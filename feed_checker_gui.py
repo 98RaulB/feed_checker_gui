@@ -353,7 +353,7 @@ def analyze_feed(feed_bytes: bytes):
 
 # -------------------- Streamlit UI --------------------
 st.set_page_config(page_title="Feed Checker GUI", layout="wide")
-st.title("🧪 Feed Checker GUI (no-URL-probing)")
+st.title("🧪 FAVI Feed Checker (no-URL-probing)")
 st.caption("Detects transformation (incl. Google Atom), validates structure, finds duplicates, checks availability, and flags missing primary images.")
 
 with st.form("feed_input"):
