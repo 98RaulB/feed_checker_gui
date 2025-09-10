@@ -354,6 +354,7 @@ def analyze_feed(feed_bytes: bytes):
 # -------------------- Streamlit UI --------------------
 st.set_page_config(page_title="Feed Checker GUI", layout="wide")
 st.title("🧪 FAVI Feed Checker (no-URL-probing)")
+st.sidebar.markdown("**Created by Raul Bertoldini**")
 st.caption("Detects transformation (incl. Google Atom), validates structure, finds duplicates, checks availability, and flags missing primary images.")
 
 with st.form("feed_input"):
@@ -451,3 +452,6 @@ if submitted:
         # Download JSON report
         report = json.dumps(result, indent=2, ensure_ascii=False)
         st.download_button("⬇️ Download JSON report", report, file_name="feed_report.json", mime="application/json")
+        st.markdown("---")
+st.markdown("© 2025 Raul Bertoldini")
+
