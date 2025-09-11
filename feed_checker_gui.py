@@ -2,7 +2,7 @@ from __future__ import annotations
 import re
 import json
 from collections import Counter
-from typing import List, Optional, Callable, Dict, Any
+from typing import List, Optional, Callable, Dict, Any, Tuple
 
 import streamlit as st
 
@@ -18,6 +18,7 @@ def strip_ns(tag: str) -> str:
     return tag.split('}', 1)[1] if '}' in tag else tag
 
 def iter_local_children_tags(elem) -> List[str]:
+    # local names of direct children
     return [strip_ns(c.tag).lower() for c in list(elem) if isinstance(c.tag, str)]
 
 def union_child_localnames(items, limit: int = 200) -> set[str]:
@@ -48,10 +49,10 @@ class StrictSpec:
         required_item_children: List[str],  # case-insensitive, 'a|b' alias allowed
         availability_xpath: List[str],
         availability_aliases: List[str],
-        # NEW: richer diagnostics for "closest spec"
+        # diagnostics for "closest spec"
         signature_tags: List[str],               # typical local child tags for an item in this spec
-        expected_root_locals: List[str] = None,  # acceptable root localnames (e.g., ["rss"], ["feed"])
-        required_ns_fragments: List[str] = None, # substrings to hint spec namespaces (e.g., ["base.google.com/ns/1.0"])
+        expected_root_locals: List[str] = None,  # acceptable root localnames (["rss"], ["feed"], ...)
+        required_ns_fragments: List[str] = None, # substrings to hint spec namespaces
     ):
         self.name = name
         self.detect_fn = detect_fn
@@ -74,15 +75,13 @@ def get_text(elem, paths: List[str]) -> Optional[str]:
             return (found.text or "").strip()
     return None
 
-
 def make_xpath_items_getter(xpath: str) -> Callable:
     def _get(root):
         return root.findall(xpath, namespaces={"g": "http://base.google.com/ns/1.0"})
     return _get
 
-
 def atom_entry_items_getter(root):
-    # Return all elements whose localname is 'entry' (handles Atom default ns)
+    # localname 'entry' (handles Atom default ns)
     return [e for e in root.iter() if strip_ns(e.tag).lower() == "entry"]
 
 
@@ -91,17 +90,22 @@ def detect_google_rss(root) -> bool:
     if strip_ns(root.tag).lower() != "rss":
         return False
     has_item = any(strip_ns(e.tag).lower() == "item" for e in root.iter())
-    has_g = any("base.google.com/ns/1.0" in (t if isinstance(t, str) else "") for t in [c.tag for c in root.iter()])
+    has_g = any(
+        "base.google.com/ns/1.0" in (t if isinstance(t, str) else "")
+        for t in [c.tag for c in root.iter()]
+    )
     return has_item and has_g
 
 def detect_google_atom(root) -> bool:
     if strip_ns(root.tag).lower() != "feed":
         return False
-    has_g_ns = any("base.google.com/ns/1.0" in (t if isinstance(t, str) else "") for t in [c.tag for c in root.iter()])
+    has_g_ns = any(
+        "base.google.com/ns/1.0" in (t if isinstance(t, str) else "")
+        for t in [c.tag for c in root.iter()]
+    )
     if not has_g_ns:
         return False
-    entries = atom_entry_items_getter(root)
-    return len(entries) > 0
+    return len(atom_entry_items_getter(root)) > 0
 
 def detect_heureka(root) -> bool:
     return root.find(".//SHOPITEM") is not None
@@ -135,7 +139,7 @@ def detect_ceneo(root) -> bool:
     return root.find(".//o") is not None
 
 
-# -------------------- Specs (order still matters for detection; diagnostics ignores order) --------------------
+# -------------------- Specs (order used only for detection) --------------------
 SPECS = [
     StrictSpec(
         "Google Merchant (g:) RSS",
@@ -245,39 +249,26 @@ SPECS = [
 
 # -------------------- Availability helper --------------------
 def has_availability(it, spec: StrictSpec) -> bool:
-    # 1) Try explicit paths
     txt = get_text(it, spec.availability_xpath)
     if txt:
         return True
-    # 2) Fallback: presence of an alias tag name among children (any value)
     child_locals_lower = set(iter_local_children_tags(it))
     return any(alias in child_locals_lower for alias in spec.availability_aliases)
 
 
 # -------------------- Closest-spec (improved) --------------------
 def score_spec_for_diagnostics(root, spec: StrictSpec) -> Dict[str, Any]:
-    """
-    Heuristic score of how 'close' this feed looks to a known spec.
-    Uses multiple signals to avoid bias toward any single tag like <product>.
-    """
     root_local = strip_ns(root.tag).lower()
-
-    # Items matched by *this spec's* item getter (not strict detector)
     items = spec.items_getter(root)
     n_items = len(items)
 
-    # Union of local child tags across a sample of items
     union_tags = union_child_localnames(items, limit=200)
-
-    # Signature Jaccard similarity
     sig_sim = jaccard(union_tags, spec.signature_tags)
 
-    # Required coverage: how many required groups have at least one alias present in union
     req_alias_sets = [[a.strip().lower() for a in req.split("|")] for req in spec.required_item_children]
     req_hits = sum(1 for aliases in req_alias_sets if any(a in union_tags for a in aliases))
     req_cov = req_hits / max(len(req_alias_sets), 1)
 
-    # Field retrievability sample
     sample = items[:200]
     id_ok = sum(1 for it in sample if get_text(it, spec.id_xpath))
     url_ok = sum(1 for it in sample if get_text(it, spec.url_xpath))
@@ -289,13 +280,10 @@ def score_spec_for_diagnostics(root, spec: StrictSpec) -> Dict[str, Any]:
     img_rate = img_ok / denom
     avail_rate = avail_ok / denom
 
-    # Root expectation
     root_bonus = 0.0
     if spec.expected_root_locals:
         root_bonus = 1.0 if root_local in spec.expected_root_locals else 0.0
 
-    # Namespace hints
-    # Get namespaces used anywhere (rough heuristic)
     ns_present = set()
     for e in root.iter():
         if isinstance(e.tag, str) and e.tag.startswith("{"):
@@ -305,18 +293,15 @@ def score_spec_for_diagnostics(root, spec: StrictSpec) -> Dict[str, Any]:
         hits = sum(1 for frag in spec.required_ns_fragments if any(frag in ns for ns in ns_present))
         ns_bonus = hits / len(spec.required_ns_fragments)
 
-    # Core score terms (weights tuned to spread the field)
     score = (
-        min(n_items, 2000) * 0.05 +          # small weight for item count
-        sig_sim * 100.0 +                    # strong weight for signature tags fit
-        req_cov * 80.0 +                     # strong weight for required coverage
-        (id_rate + url_rate + img_rate) * 35.0 +  # field retrievability
-        avail_rate * 25.0 +                  # availability presence
-        root_bonus * 10.0 +                  # root matches expectation
-        ns_bonus * 10.0                      # namespaces contain expected fragments
+        min(n_items, 2000) * 0.05 +
+        sig_sim * 100.0 +
+        req_cov * 80.0 +
+        (id_rate + url_rate + img_rate) * 35.0 +
+        avail_rate * 25.0 +
+        root_bonus * 10.0 +
+        ns_bonus * 10.0
     )
-
-    # Penalty: if many items but very poor signature fit, reduce confidence
     if n_items >= 50 and sig_sim < 0.10:
         score *= 0.6
 
@@ -333,14 +318,55 @@ def score_spec_for_diagnostics(root, spec: StrictSpec) -> Dict[str, Any]:
         "availability_rate": round(avail_rate, 3),
         "root_match": bool(root_bonus),
         "ns_hint_match_fraction": round(ns_bonus, 3),
-        "union_tags_sample": sorted(list(union_tags))[:25],  # show a small preview
+        "union_tags_sample": sorted(list(union_tags))[:25],
+        "present_tags": sorted(list(union_tags)),
     }
 
+def top_k_specs(root, k=2) -> List[Dict[str, Any]]:
+    scored = [score_spec_for_diagnostics(root, s) for s in SPECS]
+    scored.sort(key=lambda d: d["score"], reverse=True)
+    return scored[:k]
 
-def closest_spec_hint(root) -> Dict[str, Any]:
-    scores = [score_spec_for_diagnostics(root, s) for s in SPECS]
-    scores.sort(key=lambda d: d["score"], reverse=True)
-    return scores[0] if scores else {"name": None, "score": 0}
+def minimal_change_hints(spec_result: Dict[str, Any], spec: StrictSpec) -> List[str]:
+    """
+    Produce simple, actionable hints like:
+    - "rename image -> image_url"
+    - "add availability"
+    based on signature tags and present tags.
+    """
+    present = set(spec_result.get("present_tags", []))
+    hints = []
+
+    # image field mapping examples
+    if "image_url" in spec.signature_tags and "image_url" not in present and "image" in present:
+        hints.append("Use 'image_url' instead of 'image'")
+    if "image" in spec.signature_tags and "image" not in present and "image_url" in present:
+        hints.append("Use 'image' instead of 'image_url'")
+
+    # url field mapping examples
+    if "product_url" in spec.signature_tags and "product_url" not in present and ("url" in present or "link" in present):
+        hints.append("Use 'product_url' instead of 'url/link'")
+    if "link" in spec.signature_tags and "link" not in present and ("url" in present or "product_url" in present):
+        hints.append("Use 'link' instead of 'url/product_url'")
+
+    # id fields
+    id_like = {"id", "identifier", "productid", "item_id"}
+    if not any(t in present for t in id_like):
+        hints.append("Add an ID field (e.g., 'id' or 'identifier')")
+
+    # availability
+    if not any(t in present for t in ["availability", "stock", "in_stock", "availability_status", "avail"]):
+        hints.append("Add 'availability' (or 'stock'/'in_stock')")
+
+    # price
+    if not any(t in present for t in ["price", "price_with_vat", "value"]):
+        hints.append("Add a price field expected by this spec")
+
+    # description
+    if "description" in spec.signature_tags and "description" not in present:
+        hints.append("Add 'description'")
+
+    return hints[:6]  # keep it tidy
 
 
 # -------------------- Analyzer --------------------
@@ -357,6 +383,7 @@ def analyze_feed(feed_bytes: bytes):
         "severity": "PASS",
         "notes": [],
         "unrecognized_details": None,
+        "top_candidates": None,
     }
     # Parse
     try:
@@ -370,17 +397,18 @@ def analyze_feed(feed_bytes: bytes):
     # Detect (strict)
     spec = next((s for s in SPECS if s.detect_fn(root)), None)
     if not spec:
-        # Diagnostics + closest-spec hint (improved)
+        # Diagnostics + top-2 candidates
         details = {
             "root": root.tag,
             "local_root": strip_ns(root.tag),
             "top_local_tags": Counter(strip_ns(e.tag) for e in root.iter()).most_common(12),
         }
-        hint = closest_spec_hint(root)
-        details["closest_spec"] = hint
+        candidates = top_k_specs(root, k=2)
+        details["closest_spec"] = candidates[0] if candidates else None
         out["unrecognized_details"] = details
         out["detected"] = "Unrecognized"
         out["severity"] = "FAIL"
+        out["top_candidates"] = candidates
         return out
 
     out["detected"] = spec.name
@@ -428,10 +456,9 @@ def analyze_feed(feed_bytes: bytes):
     if id_dupes or url_dupes:
         out["severity"] = "FAIL"
 
-    # Missing images / availability — WARN (never FAIL)
+    # Missing images — WARN
     out["missing_img_count"] = sum(1 for x in imgs if not x)
 
-    # Elevate to WARN if needed (and not already FAIL)
     if out["severity"] != "FAIL":
         if out["missing_required"] or out["missing_img_count"] > 0 or out["missing_availability_count"] > 0:
             out["severity"] = "WARN"
@@ -441,10 +468,11 @@ def analyze_feed(feed_bytes: bytes):
     return out
 
 
-# -------------------- Streamlit UI --------------------
+# -------------------- UI --------------------
 st.set_page_config(page_title="Feed Checker GUI", layout="wide")
 st.title("🧪 Feed Checker GUI (no-URL-probing)")
-st.caption("Detects transformation (incl. Google Atom), validates structure, finds duplicates, checks availability, and flags missing primary images.")
+st.caption("Detects transformation (incl. Google Atom), validates structure, finds duplicates, checks availability, and flags missing images. "
+           "If unrecognized, shows the two closest known transformations with field-by-field hints.")
 
 with st.form("feed_input"):
     url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
@@ -461,7 +489,7 @@ if submitted:
             st.error("To fetch from URL, install `requests` first: pip install requests")
         else:
             try:
-                resp = requests.get(url, headers={"User-Agent": "FeedCheckerGUI/2.4"}, timeout=25)
+                resp = requests.get(url, headers={"User-Agent": "FeedCheckerGUI/2.5"}, timeout=25)
                 resp.raise_for_status()
                 feed_bytes = resp.content
                 label = url
@@ -492,7 +520,7 @@ if submitted:
         c3.metric("Duplicate IDs", len(result["duplicates"]["ids"]))
         c4.metric("Duplicate URLs", len(result["duplicates"]["urls"]))
 
-        # Missing required (WARN)
+        # Required (WARN)
         with st.expander("Structural required tags (WARN)", expanded=False):
             if result["missing_required"]:
                 st.write("Count of items missing each required tag (case-insensitive):")
@@ -503,12 +531,8 @@ if submitted:
         # Missing images (WARN)
         with st.expander("Primary image presence (WARN)", expanded=False):
             st.write(f"Items missing a primary image: **{result['missing_img_count']} / {result['items']}**")
-            if result["missing_img_count"]:
-                missing_idx = [i for i, x in enumerate(result["imgs"]) if not x][:50]
-                st.caption("First 50 item indices missing image:")
-                st.code(", ".join(map(str, missing_idx)) or "None")
 
-        # Availability presence (WARN)
+        # Availability (WARN)
         with st.expander("Availability presence (WARN)", expanded=False):
             st.write(f"Items missing availability: **{result['missing_availability_count']} / {result['items']}**")
 
@@ -524,21 +548,52 @@ if submitted:
             else:
                 st.write("No duplicate URLs.")
 
-        # Unrecognized diagnostics + closest-spec hint (improved)
+        # Unrecognized → show top-2 closest with clear comparison + hints
         if result["detected"] == "Unrecognized" and result.get("unrecognized_details"):
-            with st.expander("Why unrecognized? (diagnostics & closest spec hint)", expanded=True):
-                d = result["unrecognized_details"]
+            d = result["unrecognized_details"]
+            with st.expander("Why unrecognized? (diagnostics & closest specs)", expanded=True):
                 st.write(f"**Root tag:** `{d.get('root')}` (local: `{d.get('local_root')}`)")
                 top_tags = d.get("top_local_tags") or []
                 if top_tags:
                     st.write("**Top local tag frequencies (approx):**")
                     st.code("\n".join([f"{t}: {c}" for t, c in top_tags]))
-                hint = d.get("closest_spec", {})
-                if hint and hint.get("name"):
-                    st.write("**Closest known transformation (heuristic):**")
-                    st.json(hint, expanded=False)
 
-        # Download JSON report
+                candidates = result.get("top_candidates") or []
+                if candidates:
+                    # Show top-2 as a compact comparison table
+                    st.write("### Closest transformations (heuristic)")
+                    headers = ["Spec", "Score", "Signature", "Req fields", "ID", "URL", "Image", "Avail", "Root", "NS hint"]
+                    rows = []
+                    for cand in candidates[:2]:
+                        req = f"{cand['required_groups_present']}/{cand['required_groups_total']}"
+                        rows.append([
+                            cand["name"],
+                            cand["score"],
+                            f"{int(100*cand['signature_similarity'])}%",
+                            req,
+                            f"{int(100*cand['id_rate'])}%",
+                            f"{int(100*cand['url_rate'])}%",
+                            f"{int(100*cand['img_rate'])}%",
+                            f"{int(100*cand['availability_rate'])}%",
+                            "✓" if cand["root_match"] else "–",
+                            f"{int(100*cand['ns_hint_match_fraction'])}%"
+                        ])
+                    st.table([headers] + rows)
+
+                    # Field-by-field minimal change hints for the best candidate
+                    best = candidates[0]
+                    # find spec object to compare its signature expectations
+                    spec_obj = next((s for s in SPECS if s.name == best["name"]), None)
+                    if spec_obj:
+                        hints = minimal_change_hints(best, spec_obj)
+                        if hints:
+                            st.write("**Minimal changes likely needed to conform:**")
+                            for h in hints:
+                                st.write(f"- {h}")
+                        else:
+                            st.write("**This feed already aligns closely — only minor adjustments may be needed.**")
+
+        # Report download
         report = json.dumps(result, indent=2, ensure_ascii=False)
         st.download_button("⬇️ Download JSON report", report, file_name="feed_report.json", mime="application/json")
         st.markdown("---")
