@@ -2,7 +2,7 @@ from __future__ import annotations
 import re
 import json
 from collections import Counter
-from typing import List, Optional, Callable, Dict, Any, Tuple
+from typing import List, Optional, Callable, Dict, Any
 
 import streamlit as st
 
@@ -18,7 +18,6 @@ def strip_ns(tag: str) -> str:
     return tag.split('}', 1)[1] if '}' in tag else tag
 
 def iter_local_children_tags(elem) -> List[str]:
-    # local names of direct children
     return [strip_ns(c.tag).lower() for c in list(elem) if isinstance(c.tag, str)]
 
 def union_child_localnames(items, limit: int = 200) -> set[str]:
@@ -50,9 +49,9 @@ class StrictSpec:
         availability_xpath: List[str],
         availability_aliases: List[str],
         # diagnostics for "closest spec"
-        signature_tags: List[str],               # typical local child tags for an item in this spec
-        expected_root_locals: List[str] = None,  # acceptable root localnames (["rss"], ["feed"], ...)
-        required_ns_fragments: List[str] = None, # substrings to hint spec namespaces
+        signature_tags: List[str],
+        expected_root_locals: List[str] = None,
+        required_ns_fragments: List[str] = None,
     ):
         self.name = name
         self.detect_fn = detect_fn
@@ -81,7 +80,6 @@ def make_xpath_items_getter(xpath: str) -> Callable:
     return _get
 
 def atom_entry_items_getter(root):
-    # localname 'entry' (handles Atom default ns)
     return [e for e in root.iter() if strip_ns(e.tag).lower() == "entry"]
 
 
@@ -90,19 +88,13 @@ def detect_google_rss(root) -> bool:
     if strip_ns(root.tag).lower() != "rss":
         return False
     has_item = any(strip_ns(e.tag).lower() == "item" for e in root.iter())
-    has_g = any(
-        "base.google.com/ns/1.0" in (t if isinstance(t, str) else "")
-        for t in [c.tag for c in root.iter()]
-    )
+    has_g = any("base.google.com/ns/1.0" in (t if isinstance(t, str) else "") for t in [c.tag for c in root.iter()])
     return has_item and has_g
 
 def detect_google_atom(root) -> bool:
     if strip_ns(root.tag).lower() != "feed":
         return False
-    has_g_ns = any(
-        "base.google.com/ns/1.0" in (t if isinstance(t, str) else "")
-        for t in [c.tag for c in root.iter()]
-    )
+    has_g_ns = any("base.google.com/ns/1.0" in (t if isinstance(t, str) else "") for t in [c.tag for c in root.iter()])
     if not has_g_ns:
         return False
     return len(atom_entry_items_getter(root)) > 0
@@ -139,7 +131,7 @@ def detect_ceneo(root) -> bool:
     return root.find(".//o") is not None
 
 
-# -------------------- Specs (order used only for detection) --------------------
+# -------------------- Specs (order only matters for detection) --------------------
 SPECS = [
     StrictSpec(
         "Google Merchant (g:) RSS",
@@ -256,7 +248,24 @@ def has_availability(it, spec: StrictSpec) -> bool:
     return any(alias in child_locals_lower for alias in spec.availability_aliases)
 
 
-# -------------------- Closest-spec (improved) --------------------
+# -------------------- URL validation helper --------------------
+def find_url_issues(urls: List[str]) -> Dict[str, List[str]]:
+    issues = {"spaces": [], "non_ascii": []}
+    for u in urls:
+        if not u:
+            continue
+        if " " in u:
+            issues["spaces"].append(u)
+        if any(ord(ch) > 127 for ch in u):
+            issues["non_ascii"].append(u)
+    # keep only a few examples to keep UI tidy
+    for k in issues:
+        if len(issues[k]) > 20:
+            issues[k] = issues[k][:20]
+    return issues
+
+
+# -------------------- Closest-spec scoring (improved) --------------------
 def score_spec_for_diagnostics(root, spec: StrictSpec) -> Dict[str, Any]:
     root_local = strip_ns(root.tag).lower()
     items = spec.items_getter(root)
@@ -328,45 +337,26 @@ def top_k_specs(root, k=2) -> List[Dict[str, Any]]:
     return scored[:k]
 
 def minimal_change_hints(spec_result: Dict[str, Any], spec: StrictSpec) -> List[str]:
-    """
-    Produce simple, actionable hints like:
-    - "rename image -> image_url"
-    - "add availability"
-    based on signature tags and present tags.
-    """
     present = set(spec_result.get("present_tags", []))
     hints = []
-
-    # image field mapping examples
     if "image_url" in spec.signature_tags and "image_url" not in present and "image" in present:
         hints.append("Use 'image_url' instead of 'image'")
     if "image" in spec.signature_tags and "image" not in present and "image_url" in present:
         hints.append("Use 'image' instead of 'image_url'")
-
-    # url field mapping examples
     if "product_url" in spec.signature_tags and "product_url" not in present and ("url" in present or "link" in present):
         hints.append("Use 'product_url' instead of 'url/link'")
     if "link" in spec.signature_tags and "link" not in present and ("url" in present or "product_url" in present):
         hints.append("Use 'link' instead of 'url/product_url'")
-
-    # id fields
     id_like = {"id", "identifier", "productid", "item_id"}
     if not any(t in present for t in id_like):
         hints.append("Add an ID field (e.g., 'id' or 'identifier')")
-
-    # availability
     if not any(t in present for t in ["availability", "stock", "in_stock", "availability_status", "avail"]):
         hints.append("Add 'availability' (or 'stock'/'in_stock')")
-
-    # price
     if not any(t in present for t in ["price", "price_with_vat", "value"]):
         hints.append("Add a price field expected by this spec")
-
-    # description
     if "description" in spec.signature_tags and "description" not in present:
         hints.append("Add 'description'")
-
-    return hints[:6]  # keep it tidy
+    return hints[:6]
 
 
 # -------------------- Analyzer --------------------
@@ -384,6 +374,7 @@ def analyze_feed(feed_bytes: bytes):
         "notes": [],
         "unrecognized_details": None,
         "top_candidates": None,
+        "url_issues": {"products": {}, "images": {}},
     }
     # Parse
     try:
@@ -397,7 +388,6 @@ def analyze_feed(feed_bytes: bytes):
     # Detect (strict)
     spec = next((s for s in SPECS if s.detect_fn(root)), None)
     if not spec:
-        # Diagnostics + top-2 candidates
         details = {
             "root": root.tag,
             "local_root": strip_ns(root.tag),
@@ -419,7 +409,7 @@ def analyze_feed(feed_bytes: bytes):
         out["notes"].append("No items found for detected transformation.")
         return out
 
-    # Structural validation — WARN (never FAIL)
+    # Structural validation — WARN
     missing_required = Counter()
     for it in items:
         child_locals_lower = set(iter_local_children_tags(it))
@@ -439,11 +429,15 @@ def analyze_feed(feed_bytes: bytes):
     out["urls"] = urls
     out["imgs"] = imgs
 
+    # URL validation (spaces / non-ASCII)
+    out["url_issues"]["products"] = find_url_issues(urls)
+    out["url_issues"]["images"] = find_url_issues(imgs)
+
     # Availability presence — WARN
     avail_ok_flags = [has_availability(it, spec) for it in items]
     out["missing_availability_count"] = sum(1 for ok in avail_ok_flags if not ok)
 
-    # Duplicates — FAIL if any non-empty duplicates exist
+    # Duplicates — FAIL
     def dup_map(values):
         vals = [v for v in values if v]
         c = Counter(vals)
@@ -471,8 +465,7 @@ def analyze_feed(feed_bytes: bytes):
 # -------------------- UI --------------------
 st.set_page_config(page_title="Feed Checker GUI", layout="wide")
 st.title("🧪 Feed Checker GUI (no-URL-probing)")
-st.caption("Detects transformation (incl. Google Atom), validates structure, finds duplicates, checks availability, and flags missing images. "
-           "If unrecognized, shows the two closest known transformations with field-by-field hints.")
+st.caption("Detects transformation, validates structure, checks availability, duplicates, URL encoding (spaces & non-ASCII), and flags missing images. If unrecognized, shows the top 2 closest specs with hints.")
 
 with st.form("feed_input"):
     url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
@@ -489,7 +482,7 @@ if submitted:
             st.error("To fetch from URL, install `requests` first: pip install requests")
         else:
             try:
-                resp = requests.get(url, headers={"User-Agent": "FeedCheckerGUI/2.5"}, timeout=25)
+                resp = requests.get(url, headers={"User-Agent": "FeedCheckerGUI/2.6"}, timeout=25)
                 resp.raise_for_status()
                 feed_bytes = resp.content
                 label = url
@@ -509,18 +502,45 @@ if submitted:
         if result["severity"] == "FAIL":
             st.error("Overall: **FAIL** (duplicates or unrecognized/parse error).")
         elif result["severity"] == "WARN":
-            st.warning("Overall: **WARN** (parsed with issues like missing tags/images/availability).")
+            st.warning("Overall: **WARN** (parsed with issues like missing tags/images/availability or URL encoding).")
         else:
             st.success("Overall: **PASS**")
 
-        # Summary row
+        # Summary metrics
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Transformation", result["detected"] or "Unrecognized")
         c2.metric("Items", result["items"])
         c3.metric("Duplicate IDs", len(result["duplicates"]["ids"]))
         c4.metric("Duplicate URLs", len(result["duplicates"]["urls"]))
 
-        # Required (WARN)
+        # URL validation section
+        with st.expander("URL validation (spaces & non-ASCII)", expanded=False):
+            ui = result["url_issues"]
+            prod_spaces = len(ui["products"].get("spaces", []))
+            prod_nonascii = len(ui["products"].get("non_ascii", []))
+            img_spaces = len(ui["images"].get("spaces", []))
+            img_nonascii = len(ui["images"].get("non_ascii", []))
+            st.write(f"**Product URLs** — spaces: **{prod_spaces}**, non-ASCII: **{prod_nonascii}**")
+            if prod_spaces or prod_nonascii:
+                st.caption("Examples (first 20):")
+                if prod_spaces:
+                    st.write("• With spaces (use `%20`):")
+                    st.code("\n".join(ui["products"]["spaces"]))
+                if prod_nonascii:
+                    st.write("• With non-ASCII chars (percent-encode):")
+                    st.code("\n".join(ui["products"]["non_ascii"]))
+            st.write(f"**Image URLs** — spaces: **{img_spaces}**, non-ASCII: **{img_nonascii}**")
+            if img_spaces or img_nonascii:
+                st.caption("Examples (first 20):")
+                if img_spaces:
+                    st.write("• With spaces (use `%20`):")
+                    st.code("\n".join(ui["images"]["spaces"]))
+                if img_nonascii:
+                    st.write("• With non-ASCII chars (percent-encode):")
+                    st.code("\n".join(ui["images"]["non_ascii"]))
+            st.info("Tip: encode spaces as `%20` and any non-ASCII characters using standard URL percent-encoding.")
+
+        # Required tags
         with st.expander("Structural required tags (WARN)", expanded=False):
             if result["missing_required"]:
                 st.write("Count of items missing each required tag (case-insensitive):")
@@ -528,15 +548,13 @@ if submitted:
             else:
                 st.write("All required tags present.")
 
-        # Missing images (WARN)
+        # Images / Availability
         with st.expander("Primary image presence (WARN)", expanded=False):
             st.write(f"Items missing a primary image: **{result['missing_img_count']} / {result['items']}**")
-
-        # Availability (WARN)
         with st.expander("Availability presence (WARN)", expanded=False):
             st.write(f"Items missing availability: **{result['missing_availability_count']} / {result['items']}**")
 
-        # Duplicate details (FAIL)
+        # Duplicates
         with st.expander("Duplicate IDs (FAIL if present)", expanded=False):
             if result["duplicates"]["ids"]:
                 st.json(dict(list(result["duplicates"]["ids"].items())[:100]), expanded=False)
@@ -548,7 +566,7 @@ if submitted:
             else:
                 st.write("No duplicate URLs.")
 
-        # Unrecognized → show top-2 closest with clear comparison + hints
+        # Unrecognized → top-2 closest + hints
         if result["detected"] == "Unrecognized" and result.get("unrecognized_details"):
             d = result["unrecognized_details"]
             with st.expander("Why unrecognized? (diagnostics & closest specs)", expanded=True):
@@ -560,7 +578,6 @@ if submitted:
 
                 candidates = result.get("top_candidates") or []
                 if candidates:
-                    # Show top-2 as a compact comparison table
                     st.write("### Closest transformations (heuristic)")
                     headers = ["Spec", "Score", "Signature", "Req fields", "ID", "URL", "Image", "Avail", "Root", "NS hint"]
                     rows = []
@@ -580,9 +597,7 @@ if submitted:
                         ])
                     st.table([headers] + rows)
 
-                    # Field-by-field minimal change hints for the best candidate
                     best = candidates[0]
-                    # find spec object to compare its signature expectations
                     spec_obj = next((s for s in SPECS if s.name == best["name"]), None)
                     if spec_obj:
                         hints = minimal_change_hints(best, spec_obj)
@@ -593,7 +608,7 @@ if submitted:
                         else:
                             st.write("**This feed already aligns closely — only minor adjustments may be needed.**")
 
-        # Report download
+        # Download JSON report
         report = json.dumps(result, indent=2, ensure_ascii=False)
         st.download_button("⬇️ Download JSON report", report, file_name="feed_report.json", mime="application/json")
         st.markdown("---")
