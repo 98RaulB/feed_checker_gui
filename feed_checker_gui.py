@@ -17,6 +17,24 @@ except Exception:
 def strip_ns(tag: str) -> str:
     return tag.split('}', 1)[1] if '}' in tag else tag
 
+def iter_local_children_tags(elem) -> List[str]:
+    return [strip_ns(c.tag).lower() for c in list(elem) if isinstance(c.tag, str)]
+
+def union_child_localnames(items, limit: int = 200) -> set[str]:
+    s: set[str] = set()
+    for it in items[:limit]:
+        s.update(iter_local_children_tags(it))
+    return s
+
+def jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union if union else 0.0
+
 
 class StrictSpec:
     def __init__(
@@ -30,6 +48,10 @@ class StrictSpec:
         required_item_children: List[str],  # case-insensitive, 'a|b' alias allowed
         availability_xpath: List[str],
         availability_aliases: List[str],
+        # NEW: richer diagnostics for "closest spec"
+        signature_tags: List[str],               # typical local child tags for an item in this spec
+        expected_root_locals: List[str] = None,  # acceptable root localnames (e.g., ["rss"], ["feed"])
+        required_ns_fragments: List[str] = None, # substrings to hint spec namespaces (e.g., ["base.google.com/ns/1.0"])
     ):
         self.name = name
         self.detect_fn = detect_fn
@@ -40,6 +62,9 @@ class StrictSpec:
         self.required_item_children = required_item_children
         self.availability_xpath = availability_xpath
         self.availability_aliases = [a.lower() for a in availability_aliases]
+        self.signature_tags = set(t.lower() for t in signature_tags)
+        self.expected_root_locals = [x.lower() for x in (expected_root_locals or [])]
+        self.required_ns_fragments = required_ns_fragments or []
 
 
 def get_text(elem, paths: List[str]) -> Optional[str]:
@@ -63,16 +88,13 @@ def atom_entry_items_getter(root):
 
 # -------------------- Detectors --------------------
 def detect_google_rss(root) -> bool:
-    # RSS + g: namespace + <item>
     if strip_ns(root.tag).lower() != "rss":
         return False
     has_item = any(strip_ns(e.tag).lower() == "item" for e in root.iter())
     has_g = any("base.google.com/ns/1.0" in (t if isinstance(t, str) else "") for t in [c.tag for c in root.iter()])
     return has_item and has_g
 
-
 def detect_google_atom(root) -> bool:
-    # Atom <feed> + g: namespace + at least one <entry>
     if strip_ns(root.tag).lower() != "feed":
         return False
     has_g_ns = any("base.google.com/ns/1.0" in (t if isinstance(t, str) else "") for t in [c.tag for c in root.iter()])
@@ -81,23 +103,20 @@ def detect_google_atom(root) -> bool:
     entries = atom_entry_items_getter(root)
     return len(entries) > 0
 
-
 def detect_heureka(root) -> bool:
     return root.find(".//SHOPITEM") is not None
-
 
 def detect_compari_ci(root) -> bool:
     products = root.findall(".//product")
     if not products:
         return False
-    needed_any = {"identifier", "productid"}   # at least one
+    needed_any = {"identifier", "productid"}
     needed_all = {"name", "product_url", "price", "image_url"}
     for p in products:
         tags = set(strip_ns(c.tag).lower() for c in p)
         if (needed_any & tags) and needed_all.issubset(tags):
             return True
     return False
-
 
 def detect_skroutz_strict(root) -> bool:
     products = root.findall(".//product")
@@ -109,16 +128,14 @@ def detect_skroutz_strict(root) -> bool:
             return True
     return False
 
-
 def detect_ceneje(root) -> bool:
     return root.find(".//Item") is not None or root.find(".//item") is not None
-
 
 def detect_ceneo(root) -> bool:
     return root.find(".//o") is not None
 
 
-# -------------------- Specs (order matters: Compari before Skroutz) --------------------
+# -------------------- Specs (order still matters for detection; diagnostics ignores order) --------------------
 SPECS = [
     StrictSpec(
         "Google Merchant (g:) RSS",
@@ -130,6 +147,12 @@ SPECS = [
         ["title", "description", "link", "image_link"],
         availability_xpath=["./{http://base.google.com/ns/1.0}availability", "./g:availability"],
         availability_aliases=["availability"],
+        signature_tags=[
+            "title","description","link","id","image_link","price","availability","brand","mpn",
+            "gtin","condition","google_product_category","product_type","shipping"
+        ],
+        expected_root_locals=["rss"],
+        required_ns_fragments=["base.google.com/ns/1.0"],
     ),
     StrictSpec(
         "Google Merchant (g:) Atom",
@@ -141,6 +164,12 @@ SPECS = [
         ["id", "link", "image_link"],
         availability_xpath=["./{http://base.google.com/ns/1.0}availability", "./g:availability"],
         availability_aliases=["availability"],
+        signature_tags=[
+            "id","title","description","link","image_link","price","availability","brand","mpn",
+            "gtin","condition","google_product_category","product_type","shipping"
+        ],
+        expected_root_locals=["feed"],
+        required_ns_fragments=["base.google.com/ns/1.0"],
     ),
     StrictSpec(
         "Heureka strict",
@@ -150,6 +179,11 @@ SPECS = [
         ["item_id", "productname", "url", "imgurl"],
         availability_xpath=["./AVAILABILITY", "./DELIVERY", "./delivery", "./AVAILABILITY_DESC"],
         availability_aliases=["availability", "delivery", "availability_desc"],
+        signature_tags=[
+            "item_id","productname","description","url","imgurl","price","manufacturer",
+            "categorytext","availability","delivery","delivery_time"
+        ],
+        expected_root_locals=["shop"],
     ),
     StrictSpec(
         "Compari / Árukereső / Pazaruvaj (case-insensitive)",
@@ -161,6 +195,11 @@ SPECS = [
         ["identifier|productid", "name", "product_url", "price", "image_url", "category", "description"],
         availability_xpath=["./availability", "./in_stock", "./stock", "./availability_status"],
         availability_aliases=["availability", "in_stock", "stock", "availability_status"],
+        signature_tags=[
+            "identifier","productid","name","product_url","price","old_price","image_url","category",
+            "category_full","manufacturer","description","delivery_time","stock","in_stock"
+        ],
+        expected_root_locals=["products"],
     ),
     StrictSpec(
         "Skroutz strict",
@@ -170,6 +209,10 @@ SPECS = [
         ["id", "name", "link", "image", "price_with_vat"],
         availability_xpath=["./availability", "./in_stock", "./stock"],
         availability_aliases=["availability", "in_stock", "stock"],
+        signature_tags=[
+            "id","name","link","image","price_with_vat","category","category_id","brand","availability"
+        ],
+        expected_root_locals=["products"],
     ),
     StrictSpec(
         "Jeftinije / Ceneje strict",
@@ -179,6 +222,10 @@ SPECS = [
         ["id", "name", "link", "mainimage|image", "price"],
         availability_xpath=["./availability", "./in_stock", "./stock"],
         availability_aliases=["availability", "in_stock", "stock"],
+        signature_tags=[
+            "id","name","link","mainimage","image","price","brand","category","availability","description"
+        ],
+        expected_root_locals=["items","products","shop"],
     ),
     StrictSpec(
         "Ceneo strict",
@@ -188,6 +235,10 @@ SPECS = [
         ["name", "price", "cat", "url"],
         availability_xpath=["./availability", "./stock", "./avail"],
         availability_aliases=["availability", "stock", "avail"],
+        signature_tags=[
+            "id","name","price","cat","url","imgs","main","desc","avail","availability","stock"
+        ],
+        expected_root_locals=["offers"],
     ),
 ]
 
@@ -199,51 +250,90 @@ def has_availability(it, spec: StrictSpec) -> bool:
     if txt:
         return True
     # 2) Fallback: presence of an alias tag name among children (any value)
-    child_locals_lower = set(strip_ns(c.tag).lower() for c in list(it))
+    child_locals_lower = set(iter_local_children_tags(it))
     return any(alias in child_locals_lower for alias in spec.availability_aliases)
 
 
-# -------------------- Closest-spec (when unrecognized) --------------------
+# -------------------- Closest-spec (improved) --------------------
 def score_spec_for_diagnostics(root, spec: StrictSpec) -> Dict[str, Any]:
     """
-    Heuristic score of how 'close' this feed looks to a known spec,
-    used only when a feed is unrecognized by strict detectors.
+    Heuristic score of how 'close' this feed looks to a known spec.
+    Uses multiple signals to avoid bias toward any single tag like <product>.
     """
+    root_local = strip_ns(root.tag).lower()
+
+    # Items matched by *this spec's* item getter (not strict detector)
     items = spec.items_getter(root)
     n_items = len(items)
 
-    # Required children coverage across sample
-    req_alias_sets = [[a.strip().lower() for a in req.split("|")] for req in spec.required_item_children]
-    localname_counts = Counter()
-    for it in items[:200]:
-        for c in list(it):
-            localname_counts.update([strip_ns(c.tag).lower()])
-    req_hits = 0
-    for aliases in req_alias_sets:
-        if any(a in localname_counts for a in aliases):
-            req_hits += 1
+    # Union of local child tags across a sample of items
+    union_tags = union_child_localnames(items, limit=200)
 
-    # Field retrievability sample (ids/urls/images)
+    # Signature Jaccard similarity
+    sig_sim = jaccard(union_tags, spec.signature_tags)
+
+    # Required coverage: how many required groups have at least one alias present in union
+    req_alias_sets = [[a.strip().lower() for a in req.split("|")] for req in spec.required_item_children]
+    req_hits = sum(1 for aliases in req_alias_sets if any(a in union_tags for a in aliases))
+    req_cov = req_hits / max(len(req_alias_sets), 1)
+
+    # Field retrievability sample
     sample = items[:200]
     id_ok = sum(1 for it in sample if get_text(it, spec.id_xpath))
     url_ok = sum(1 for it in sample if get_text(it, spec.url_xpath))
     img_ok = sum(1 for it in sample if get_text(it, spec.image_xpath))
+    avail_ok = sum(1 for it in sample if has_availability(it, spec))
+    denom = max(len(sample), 1)
+    id_rate = id_ok / denom
+    url_rate = url_ok / denom
+    img_rate = img_ok / denom
+    avail_rate = avail_ok / denom
 
-    # Score: items weight + required coverage + field retrievability
+    # Root expectation
+    root_bonus = 0.0
+    if spec.expected_root_locals:
+        root_bonus = 1.0 if root_local in spec.expected_root_locals else 0.0
+
+    # Namespace hints
+    # Get namespaces used anywhere (rough heuristic)
+    ns_present = set()
+    for e in root.iter():
+        if isinstance(e.tag, str) and e.tag.startswith("{"):
+            ns_present.add(e.tag.split("}", 1)[0][1:])
+    ns_bonus = 0.0
+    if spec.required_ns_fragments:
+        hits = sum(1 for frag in spec.required_ns_fragments if any(frag in ns for ns in ns_present))
+        ns_bonus = hits / len(spec.required_ns_fragments)
+
+    # Core score terms (weights tuned to spread the field)
     score = (
-        min(n_items, 1000) * 1.0 +
-        req_hits * 50.0 +
-        (id_ok + url_ok + img_ok) * 2.0
+        min(n_items, 2000) * 0.05 +          # small weight for item count
+        sig_sim * 100.0 +                    # strong weight for signature tags fit
+        req_cov * 80.0 +                     # strong weight for required coverage
+        (id_rate + url_rate + img_rate) * 35.0 +  # field retrievability
+        avail_rate * 25.0 +                  # availability presence
+        root_bonus * 10.0 +                  # root matches expectation
+        ns_bonus * 10.0                      # namespaces contain expected fragments
     )
+
+    # Penalty: if many items but very poor signature fit, reduce confidence
+    if n_items >= 50 and sig_sim < 0.10:
+        score *= 0.6
 
     return {
         "name": spec.name,
-        "score": score,
+        "score": round(score, 2),
         "items_found": n_items,
-        "required_hits": req_hits,
-        "id_ok": id_ok,
-        "url_ok": url_ok,
-        "img_ok": img_ok,
+        "signature_similarity": round(sig_sim, 3),
+        "required_groups_present": req_hits,
+        "required_groups_total": len(req_alias_sets),
+        "id_rate": round(id_rate, 3),
+        "url_rate": round(url_rate, 3),
+        "img_rate": round(img_rate, 3),
+        "availability_rate": round(avail_rate, 3),
+        "root_match": bool(root_bonus),
+        "ns_hint_match_fraction": round(ns_bonus, 3),
+        "union_tags_sample": sorted(list(union_tags))[:25],  # show a small preview
     }
 
 
@@ -280,11 +370,11 @@ def analyze_feed(feed_bytes: bytes):
     # Detect (strict)
     spec = next((s for s in SPECS if s.detect_fn(root)), None)
     if not spec:
-        # Build diagnostics + closest-spec hint
+        # Diagnostics + closest-spec hint (improved)
         details = {
             "root": root.tag,
             "local_root": strip_ns(root.tag),
-            "top_local_tags": Counter(strip_ns(e.tag) for e in root.iter()).most_common(12)
+            "top_local_tags": Counter(strip_ns(e.tag) for e in root.iter()).most_common(12),
         }
         hint = closest_spec_hint(root)
         details["closest_spec"] = hint
@@ -304,7 +394,7 @@ def analyze_feed(feed_bytes: bytes):
     # Structural validation — WARN (never FAIL)
     missing_required = Counter()
     for it in items:
-        child_locals_lower = set(strip_ns(c.tag).lower() for c in list(it))
+        child_locals_lower = set(iter_local_children_tags(it))
         for req in spec.required_item_children:
             aliases = [a.strip().lower() for a in req.split('|')]
             if not any(a in child_locals_lower for a in aliases):
@@ -353,7 +443,7 @@ def analyze_feed(feed_bytes: bytes):
 
 # -------------------- Streamlit UI --------------------
 st.set_page_config(page_title="Feed Checker GUI", layout="wide")
-st.title("🧪 FAVI Feed Checker (no-URL-probing)")
+st.title("🧪 Feed Checker GUI (no-URL-probing)")
 st.caption("Detects transformation (incl. Google Atom), validates structure, finds duplicates, checks availability, and flags missing primary images.")
 
 with st.form("feed_input"):
@@ -371,7 +461,7 @@ if submitted:
             st.error("To fetch from URL, install `requests` first: pip install requests")
         else:
             try:
-                resp = requests.get(url, headers={"User-Agent": "FeedCheckerGUI/2.3"}, timeout=25)
+                resp = requests.get(url, headers={"User-Agent": "FeedCheckerGUI/2.4"}, timeout=25)
                 resp.raise_for_status()
                 feed_bytes = resp.content
                 label = url
@@ -434,7 +524,7 @@ if submitted:
             else:
                 st.write("No duplicate URLs.")
 
-        # Unrecognized diagnostics + closest-spec hint
+        # Unrecognized diagnostics + closest-spec hint (improved)
         if result["detected"] == "Unrecognized" and result.get("unrecognized_details"):
             with st.expander("Why unrecognized? (diagnostics & closest spec hint)", expanded=True):
                 d = result["unrecognized_details"]
