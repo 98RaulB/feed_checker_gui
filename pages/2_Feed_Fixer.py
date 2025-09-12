@@ -1,5 +1,4 @@
 from __future__ import annotations
-import hashlib
 from typing import Dict, Any, List, Tuple
 import streamlit as st
 
@@ -12,13 +11,26 @@ except Exception:
 
 # -------------------- Helpers --------------------
 def strip_ns(tag: str) -> str:
-    return tag.split('}', 1)[1] if '}' in tag else tag
+    """Return localname without namespace, e.g. {ns}id -> id."""
+    return tag.split('}', 1)[1] if isinstance(tag, str) and '}' in tag else tag
 
 def first_text(elem, xpaths: List[str]) -> str:
+    """Try xpaths in order (with g: namespace) and return first non-empty text."""
     for xp in xpaths:
-        n = elem.find(xp, namespaces={"g": "http://base.google.com/ns/1.0"})
+        n = elem.find(xp, namespaces={"g": "http://base.google.com/ns/1.0", "content": "http://purl.org/rss/1.0/modules/content/"})
         if n is not None:
             t = (n.text or "").strip()
+            if t:
+                return t
+    return ""
+
+def first_localname_text(elem, locals_: List[str]) -> str:
+    """Search direct children by localname (namespace-agnostic)."""
+    wanted = {n.lower() for n in locals_}
+    for child in list(elem):
+        loc = strip_ns(child.tag).lower()
+        if loc in wanted:
+            t = (child.text or "").strip()
             if t:
                 return t
     return ""
@@ -37,13 +49,10 @@ def percent_encode_url(url: str) -> str:
         return url
     from urllib.parse import urlsplit, urlunsplit, quote
     parts = urlsplit(url)
-    path = quote(parts.path, safe="/:@&+$,;=-._~")
-    query = quote(parts.query, safe="=/?&:+,;@-._~")
-    frag  = quote(parts.fragment, safe="-._~")
+    path = quote(parts.path or "", safe="/:@&+$,;=-._~")
+    query = quote(parts.query or "", safe="=/?&:+,;@-._~")
+    frag  = quote(parts.fragment or "", safe="-._~")
     return urlunsplit((parts.scheme, parts.netloc, path, query, frag))
-
-def synth_id_from_url(u: str) -> str:
-    return hashlib.sha1((u or "").encode("utf-8")).hexdigest()[:16]
 
 def normalize_availability(raw: str) -> str:
     v = (raw or "").strip().lower()
@@ -54,10 +63,9 @@ def normalize_availability(raw: str) -> str:
 
 # -------------------- Neutral extractor (rich) --------------------
 CORE_TAGS = {
-    # common logical fields (lowercased) to avoid duplicating into attrs
     "id","identifier","productid","item_id",
     "title","name","productname",
-    "description","content",
+    "description","content","encoded","desc","short_description","long_description","longdesc",
     "link","url","product_url",
     "image","image_url","imgurl","image_link","imgs","mainimage",
     "price","price_with_vat","value",
@@ -68,16 +76,13 @@ CORE_TAGS = {
 
 def kv_from_params(it) -> List[Tuple[str,str]]:
     pairs: List[Tuple[str,str]] = []
-    # Common parameter patterns across feeds
     for xp in [
         "./param", "./parameter", "./parameters/parameter", "./params/param",
         "./attribute", "./attributes/attribute", "./size_list/size", "./variant/param"
     ]:
         for node in it.findall(xp):
-            # name may be in attribute or subnode
             name = (node.get("name") or node.get("Name") or "").strip()
             if not name:
-                # try <name>child</name>
                 name = first_text(node, ["./name","./Name"])
             if not name:
                 continue
@@ -87,17 +92,18 @@ def kv_from_params(it) -> List[Tuple[str,str]]:
     return pairs
 
 def all_images(it) -> List[str]:
-    # collect many possible image fields; primary should be first
-    imgs = []
-    # obvious singletons
+    imgs: List[str] = []
     primary = first_text(it, [
         "./image","./Image","./image_url","./Image_url","./IMGURL","./mainImage",
         "./{http://base.google.com/ns/1.0}image_link","./g:image_link",
         "./imgs/main"
     ])
+    if not primary:
+        # sometimes legacy puts primary image in a localname 'image_link' without ns
+        primary = first_localname_text(it, ["image_link"])
     if primary:
         imgs.append(primary)
-    # gallery-like
+
     gallery = all_texts(it, [
         "./imgs/img","./images/image","./gallery/image","./gallery/img","./image_list/image",
         "./{http://base.google.com/ns/1.0}additional_image_link","./g:additional_image_link"
@@ -105,15 +111,7 @@ def all_images(it) -> List[str]:
     for u in gallery:
         if u and u not in imgs:
             imgs.append(u)
-    # fallbacks (any child that looks like an image URL)
-    for child in list(it):
-        tag = strip_ns(child.tag).lower() if isinstance(child.tag, str) else ""
-        if tag in CORE_TAGS:  # already handled
-            continue
-        t = (child.text or "").strip()
-        if t and ("http://" in t or "https://" in t) and any(x in t.lower() for x in [".jpg",".jpeg",".png",".webp",".gif"]):
-            if t not in imgs:
-                imgs.append(t)
+
     # percent-encode & dedupe
     out = []
     for u in imgs:
@@ -144,7 +142,15 @@ def extract_items_neutral(root) -> List[Dict[str, Any]]:
             "./{http://base.google.com/ns/1.0}link","./g:link"
         ])
         title = first_text(it, ["./title","./Title","./name","./Name","./PRODUCTNAME","./productname"])
-        desc  = first_text(it, ["./description","./Description","./content"])
+
+        # Description: try many legacy tags + namespaced content:encoded
+        desc = first_text(it, [
+            "./description","./Description",
+            "./content:encoded",  # namespaced RSS content module
+        ])
+        if not desc:
+            desc = first_localname_text(it, ["encoded","desc","short_description","long_description","longdesc"])
+
         price = first_text(it, ["./price","./PRICE","./value","./price_with_vat","./Price"])
         avail = first_text(it, [
             "./availability","./in_stock","./stock","./availability_status","./AVAILABILITY","./avail",
@@ -164,14 +170,14 @@ def extract_items_neutral(root) -> List[Dict[str, Any]]:
 
         images = all_images(it)
 
-        # generic attributes (params, attributes, etc.)
+        # generic attributes
         attrs: Dict[str, str] = {}
         for k, v in kv_from_params(it):
             lk = k.strip().lower()
             if lk and v and lk not in attrs:
                 attrs[lk] = v
 
-        # also pick up simple child tags not in core set (best-effort)
+        # simple child tags not in core set -> attrs
         for child in list(it):
             if not isinstance(child.tag, str):
                 continue
@@ -182,13 +188,11 @@ def extract_items_neutral(root) -> List[Dict[str, Any]]:
             if t and local not in attrs and not t.startswith("<"):
                 attrs[local] = t
 
-        # normalize & synthesize
+        # normalize URLs
         link = percent_encode_url(link) if link else ""
-        if not idv and link:
-            idv = synth_id_from_url(link)
 
         items.append({
-            "id": idv or "",
+            "id": (idv or "").strip(),   # STRICT: do not fabricate
             "title": title or "",
             "description": desc or "",
             "link": link or "",
@@ -200,7 +204,7 @@ def extract_items_neutral(root) -> List[Dict[str, Any]]:
             "category": category or "",
             "product_type": product_type or "",
             "google_product_category": gpc or "",
-            "images": images,       # list
+            "images": images,       # list[str]
             "attrs": attrs          # dict[str,str]
         })
     return items
@@ -215,10 +219,8 @@ def emit_skroutz(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
         if r["id"]:    out.append(f"<id>{escape(r['id'])}</id>")
         if r["title"]: out.append(f"<name>{escape(r['title'])}</name>")
         if r["link"]:  out.append(f"<link>{escape(r['link'])}</link>")
-        # primary image
         if r.get("images"):
             out.append(f"<image>{escape(r['images'][0])}</image>")
-            # additional images
             if len(r["images"]) > 1:
                 out.append("<images>")
                 for u in r["images"][1:]:
@@ -239,7 +241,6 @@ def emit_skroutz(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
     out.append("</products>")
     return ("\n".join(out)).encode("utf-8")
 
-
 def emit_compari(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
     from xml.sax.saxutils import escape
     out = ['<?xml version="1.0" encoding="UTF-8"?>', "<Products>"]
@@ -248,7 +249,6 @@ def emit_compari(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
         if r["id"]:    out.append(f"<Identifier>{escape(r['id'])}</Identifier>")
         if r["title"]: out.append(f"<Name>{escape(r['title'])}</Name>")
         if r["link"]:  out.append(f"<Product_url>{escape(r['link'])}</Product_url>")
-        # primary image + extras
         if r.get("images"):
             out.append(f"<Image_url>{escape(r['images'][0])}</Image_url>")
             if len(r["images"]) > 1:
@@ -260,7 +260,6 @@ def emit_compari(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
         if r["availability"]: out.append(f"<availability>{escape(r['availability'])}</availability>")
         if r["brand"]: out.append(f"<Manufacturer>{escape(r['brand'])}</Manufacturer>")
         if r["category"]: out.append(f"<Category>{escape(r['category'])}</Category>")
-        # neutral parameters block (many channels will ignore if unknown)
         if include_extras and r["attrs"]:
             out.append("<Parameters>")
             for k, v in r["attrs"].items():
@@ -270,10 +269,8 @@ def emit_compari(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
     out.append("</Products>")
     return ("\n".join(out)).encode("utf-8")
 
-
 def emit_google_rss(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
     from xml.sax.saxutils import escape
-    # Map some common attrs to official Google fields
     def g_from_attrs(attrs: Dict[str,str], key: str) -> str:
         return attrs.get(key, "") or attrs.get(key.replace("_"," "), "")
     out = [
@@ -286,11 +283,12 @@ def emit_google_rss(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
     ]
     for r in rows:
         out.append("<item>")
+        # REQUIRED
         if r["id"]:            out.append(f"<g:id>{escape(r['id'])}</g:id>")
         if r["title"]:         out.append(f"<title>{escape(r['title'])}</title>")
+        # DESCRIPTION (now robustly preserved)
         if r["description"]:   out.append(f"<description>{escape(r['description'])}</description>")
         if r["link"]:          out.append(f"<link>{escape(r['link'])}</link>")
-        # images
         if r.get("images"):
             out.append(f"<g:image_link>{escape(r['images'][0])}</g:image_link>")
             for u in r["images"][1:]:
@@ -303,23 +301,20 @@ def emit_google_rss(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
         if r["product_type"]:  out.append(f"<g:product_type>{escape(r['product_type'])}</g:product_type>")
         if r["google_product_category"]:
             out.append(f"<g:google_product_category>{escape(r['google_product_category'])}</g:google_product_category>")
-        # Map popular attrs into Google keys if present
         for key in ["color","size","material","age_group","gender"]:
             val = g_from_attrs(r["attrs"], key)
             if val:
                 out.append(f"<g:{key}>{escape(val)}</g:{key}>")
-        # Optionally include neutral <extras> (ignored by Google)
         if include_extras and r["attrs"]:
             out.append("<extras>")
             for k, v in r["attrs"].items():
-                if k in {"color","size","material","age_group","gender"}:  # already mapped
+                if k in {"color","size","material","age_group","gender"}:
                     continue
                 out.append(f"<{escape(k)}>{escape(v)}</{escape(k)}>")
             out.append("</extras>")
         out.append("</item>")
     out.append("</channel></rss>")
     return ("\n".join(out)).encode("utf-8")
-
 
 def emit_google_atom(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
     from xml.sax.saxutils import escape
@@ -335,6 +330,7 @@ def emit_google_atom(rows: List[Dict[str, Any]], include_extras: bool) -> bytes:
         out.append("<entry>")
         if r["id"]:            out.append(f"<g:id>{escape(r['id'])}</g:id>")
         if r["title"]:         out.append(f"<title>{escape(r['title'])}</title>")
+        # DESCRIPTION (Atom uses <content>)
         if r["description"]:   out.append(f"<content type=\"html\">{escape(r['description'])}</content>")
         if r["link"]:          out.append(f"<g:link>{escape(r['link'])}</g:link>")
         if r.get("images"):
@@ -376,12 +372,12 @@ EMITTERS = {
 # -------------------- UI --------------------
 st.set_page_config(page_title="Feed Fixer (Preview)", layout="wide")
 st.title("🔧 Feed Fixer (Preview)")
-st.caption("Transforms feeds while preserving descriptions, multi-images, identifiers and attributes. Download to test.")
+st.caption("Strict IDs. Preserves descriptions, multi-images, identifiers, categories, and attributes. Download to test.")
 
 with st.form("input"):
     src_url = st.text_input("Source feed URL (http/https)", placeholder="https://example.com/feed.xml")
     src_file = st.file_uploader("...or upload an XML file", type=["xml"])
-    target = st.selectbox("Target specification", list(EMITTERS.keys()), index=0)
+    target = st.selectbox("Target specification", list(EMITTERS.keys()), index=2)
     st.divider()
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -389,8 +385,8 @@ with st.form("input"):
     with c2:
         do_dedupe = st.checkbox("De-duplicate by (id, link)", value=True)
     with c3:
-        include_extras = st.checkbox("Include neutral Extras block", value=True,
-                                     help="Adds <Extras>/<Parameters> with all attributes for testing; ignored by channels.")
+        include_extras = st.checkbox("Include neutral Extras/Parameters", value=True,
+                                     help="Adds <extras>/<Parameters> with all attributes for inspection; ignored by channels.")
     limit_items = st.number_input("Limit items (0 = all)", min_value=0, value=0, step=50)
     submitted = st.form_submit_button("Transform")
 
@@ -403,7 +399,7 @@ if submitted:
         else:
             try:
                 import requests
-                r = requests.get(src_url, headers={"User-Agent": "FeedFixerPreview/1.1"}, timeout=40)
+                r = requests.get(src_url, headers={"User-Agent": "FeedFixerPreview/1.2"}, timeout=40)
                 r.raise_for_status()
                 feed_bytes = r.content
                 label = src_url
@@ -424,6 +420,15 @@ if submitted:
             st.stop()
 
         rows = extract_items_neutral(root)
+
+        # STRICT: fail if any ID is missing
+        missing_ids = [i for i, r in enumerate(rows) if not (r.get("id") or "").strip()]
+        if missing_ids:
+            st.error(f"Missing ID on {len(missing_ids)} items. Fix the source feed (every product must have a stable ID).")
+            with st.expander("Show first missing-ID indices"):
+                st.write(missing_ids[:50])
+            st.stop()
+
         total_before = len(rows)
 
         if do_avail_norm:
@@ -461,5 +466,6 @@ if submitted:
         dl_name = f"fixed_{target.lower().replace(' ','_')}_rich.xml"
         st.download_button("⬇️ Download fixed feed", xml_bytes, file_name=dl_name, mime="application/xml")
 
-        st.info("This preserves extra data where the target spec supports it, and adds a neutral block otherwise. "
-                "When DEV gives you /fixed/ write access, we can add a “Publish” button to upload to a stable URL.")
+        st.info("Descriptions from legacy tags (e.g., desc/long_description/content:encoded) are now preserved. "
+                "IDs are mandatory; none are fabricated. When DEV provides /fixed/ access, we can add a “Publish” button.")
+
