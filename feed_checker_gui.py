@@ -247,7 +247,7 @@ if submitted:
     show_sample("Missing Availability (item indices)", missing_avail_idx, sample_show)
 
     if missing_id_idx:
-    with st.expander("Show first offending rows (index, link, primary image present)"):
+        with st.expander("Show first offending rows (index, link, primary image present)"):
         rows = []
         for i in missing_id_idx[:sample_show]:
             link_i = links[i] if i < len(links) else ""
