@@ -1,12 +1,10 @@
 # feed_checker_gui.py
 from __future__ import annotations
-import io
 from typing import List, Tuple, Dict
 import streamlit as st
 
 # Use the shared spec/rules from feed_specs.py (your file)
 from feed_specs import (
-    NS,
     detect_spec,
     get_item_nodes,
     read_id,
@@ -62,6 +60,25 @@ def status_pill(text: str, color: str = "#16a34a"):  # green default
         unsafe_allow_html=True,
     )
 
+def show_sample(title: str, indices: List[int], sample_n: int = 10, red: bool = False):
+    if not indices:
+        st.write(f"**{title}:** none 🎉")
+        return
+    st.write(f"**{title}:** {len(indices)}")
+    with st.expander(f"Show first {min(sample_n, len(indices))}"):
+        subset = indices[:sample_n]
+        if red:
+            # render as a red bullet list
+            st.markdown(
+                "<ul style='margin-top:0'>"
+                + "".join(f"<li style='color:#dc2626'>item index {i}</li>" for i in subset)
+                + "</ul>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.write(subset)
+
+# ---------- Form ----------
 with st.form("input"):
     url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
     up = st.file_uploader("…or upload an XML file", type=["xml"])
@@ -77,7 +94,7 @@ if submitted:
     xml_bytes = None
     src_label = None
     if url.strip():
-        if not url.lower().startswith(("http://","https://")):
+        if not url.lower().startswith(("http://", "https://")):
             st.error("URL must start with http:// or https://")
             st.stop()
         try:
@@ -107,10 +124,7 @@ if submitted:
             st.stop()
 
     # 3) Detect transformation (using shared rules)
-    if xml_ok:
-        spec_name = detect_spec(root)
-    else:
-        spec_name = "UNKNOWN"
+    spec_name = detect_spec(root) if xml_ok else "UNKNOWN"
 
     # 4) Collect items & run checks
     items = get_item_nodes(root, spec_name) if spec_name != "UNKNOWN" else []
@@ -163,25 +177,25 @@ if submitted:
 
     total_dups = len(dup_id_pairs) + len(dup_link_pairs)
 
-        # ---------- TOP ROW ----------
+    # ---------- TOP ROW ----------
     st.markdown("---")
-    c1, c2, c3, c4 = st.columns([1,1,1,1], gap="large")
-    
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1], gap="large")
+
     with c1:
         if spec_name != "UNKNOWN":
             status_pill(f"Transformation: {spec_name}", "#16a34a")  # green
         else:
             status_pill("Transformation: UNKNOWN", "#6b7280")       # gray
-    
+
     with c2:
         status_pill(f"Items: {total_items}", "#16a34a")             # always green
-    
+
     with c3:
-        if (len(dup_id_pairs) + len(dup_link_pairs)) > 0:
-            status_pill(f"Duplicates: {len(dup_id_pairs) + len(dup_link_pairs)}", "#dc2626")
+        if total_dups > 0:
+            status_pill(f"Duplicates: {total_dups}", "#dc2626")
         else:
             status_pill("Duplicates: 0", "#16a34a")
-    
+
     with c4:
         if len(missing_id_idx) > 0:
             status_pill(f"Missing IDs: {len(missing_id_idx)}", "#dc2626")  # RED if any
@@ -190,29 +204,13 @@ if submitted:
 
     # ---------- SUMMARY ----------
     pass_fail: Dict[str, Tuple[bool, bool, str]] = {}
-
-    # XML syntax
     pass_fail["XML syntax"] = (xml_ok, False, "")
-
-    # Transformation detection
     pass_fail["Transformation detected"] = (spec_name != "UNKNOWN", False, spec_name if spec_name != "UNKNOWN" else "")
-
-    # IDs present (strict: fail if any missing)
     pass_fail["IDs present"] = (len(missing_id_idx) == 0, False, f"(missing: {len(missing_id_idx)})")
-
-    # Duplicate IDs (fail if any)
     pass_fail["Duplicate IDs"] = (len(dup_id_pairs) == 0, False, f"(duplicates: {len(dup_id_pairs)})")
-
-    # Duplicate Product URLs (fail if any)
     pass_fail["Duplicate Product URLs"] = (len(dup_link_pairs) == 0, False, f"(duplicates: {len(dup_link_pairs)})")
-
-    # Product URL present (warn if missing)
     pass_fail["Product URL present"] = (True, len(missing_link_idx) > 0, f"(missing: {len(missing_link_idx)})")
-
-    # Primary image present (warn if missing)
     pass_fail["Primary image present"] = (True, len(missing_img_idx) > 0, f"(missing: {len(missing_img_idx)})")
-
-    # Availability present (warn if missing)
     pass_fail["Availability present"] = (True, len(missing_avail_idx) > 0, f"(missing: {len(missing_avail_idx)})")
 
     st.markdown("---")
@@ -222,54 +220,35 @@ if submitted:
     st.markdown("---")
     st.subheader("Details")
 
-def show_sample(title: str, indices: List[int], sample_n: int = 10, red: bool = False):
-    if not indices:
-        st.write(f"**{title}:** none 🎉")
-        return
-    st.write(f"**{title}:** {len(indices)}")
-    with st.expander(f"Show first {min(sample_n, len(indices))}"):
-        subset = indices[:sample_n]
-        if red:
-            # render as a red bullet list
-            st.markdown(
-                "<ul style='margin-top:0'>"
-                + "".join(f"<li style='color:#dc2626'>item index {i}</li>" for i in subset)
-                + "</ul>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.write(subset)
+    show_sample("Missing ID (item indices)", missing_id_idx, sample_show, red=True)
+    show_sample("Missing Product URL (item indices)", missing_link_idx, sample_show)
+    show_sample("Missing Primary Image (item indices)", missing_img_idx, sample_show)
+    show_sample("Missing Availability (item indices)", missing_avail_idx, sample_show)
 
-# Use it like this:
-show_sample("Missing ID (item indices)", missing_id_idx, sample_show, red=True)
-show_sample("Missing Product URL (item indices)", missing_link_idx, sample_show)
-show_sample("Missing Primary Image (item indices)", missing_img_idx, sample_show)
-show_sample("Missing Availability (item indices)", missing_avail_idx, sample_show)
+    if missing_id_idx:
+        with st.expander("Show first offending rows (index, link, primary image present)"):
+            rows = []
+            for i in missing_id_idx[:sample_show]:
+                link_i = links[i] if i < len(links) else ""
+                prim_i = "yes" if i < len(items) and (gather_primary_image(items[i], spec_name) or "").strip() else "no"
+                rows.append({"index": i, "link": link_i, "primary_image": prim_i})
+            st.dataframe(rows, use_container_width=True)
 
-if missing_id_idx:
-    with st.expander("Show first offending rows (index, link, primary image present)"):
-        rows = []
-        for i in missing_id_idx[:sample_show]:
-            link_i = links[i] if i < len(links) else ""
-            # primary image presence
-            prim_i = "yes" if i < len(items) and (gather_primary_image(items[i], spec_name) or "").strip() else "no"
-            rows.append({"index": i, "link": link_i, "primary_image": prim_i})
-        st.dataframe(rows, use_container_width=True)
+    if dup_id_pairs:
+        st.write(f"**Duplicate IDs:** {len(dup_id_pairs)}")
+        with st.expander("Show first duplicates (old_index, new_index, id)"):
+            st.write(dup_id_pairs[:sample_show])
+    else:
+        st.write("**Duplicate IDs:** none 🎉")
 
-if dup_id_pairs:
-    st.write(f"**Duplicate IDs:** {len(dup_id_pairs)}")
-    with st.expander("Show first duplicates (old_index, new_index, id)"):
-        st.write(dup_id_pairs[:sample_show])
-else:
-    st.write("**Duplicate IDs:** none 🎉")
-
-if dup_link_pairs:
-    st.write(f"**Duplicate Product URLs:** {len(dup_link_pairs)}")
-    with st.expander("Show first duplicates (old_index, new_index, url)"):
-        st.write(dup_link_pairs[:sample_show])
-else:
-    st.write("**Duplicate Product URLs:** none 🎉")
+    if dup_link_pairs:
+        st.write(f"**Duplicate Product URLs:** {len(dup_link_pairs)}")
+        with st.expander("Show first duplicates (old_index, new_index, url)"):
+            st.write(dup_link_pairs[:sample_show])
+    else:
+        st.write("**Duplicate Product URLs:** none 🎉")
 
     st.markdown("---")
+
 st.markdown("© 2025 Raul Bertoldini")
 
