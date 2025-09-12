@@ -163,24 +163,30 @@ if submitted:
 
     total_dups = len(dup_id_pairs) + len(dup_link_pairs)
 
-    # ---------- TOP ROW (as requested) ----------
+        # ---------- TOP ROW ----------
     st.markdown("---")
-    c1, c2, c3 = st.columns([1,1,1], gap="large")
-
+    c1, c2, c3, c4 = st.columns([1,1,1,1], gap="large")
+    
     with c1:
         if spec_name != "UNKNOWN":
             status_pill(f"Transformation: {spec_name}", "#16a34a")  # green
         else:
             status_pill("Transformation: UNKNOWN", "#6b7280")       # gray
-
+    
     with c2:
         status_pill(f"Items: {total_items}", "#16a34a")             # always green
-
+    
     with c3:
-        if total_dups > 0:
-            status_pill(f"Duplicates: {total_dups}", "#dc2626")     # red if any dup
+        if (len(dup_id_pairs) + len(dup_link_pairs)) > 0:
+            status_pill(f"Duplicates: {len(dup_id_pairs) + len(dup_link_pairs)}", "#dc2626")
         else:
-            status_pill("Duplicates: 0", "#16a34a")                 # green if none
+            status_pill("Duplicates: 0", "#16a34a")
+    
+    with c4:
+        if len(missing_id_idx) > 0:
+            status_pill(f"Missing IDs: {len(missing_id_idx)}", "#dc2626")  # RED if any
+        else:
+            status_pill("Missing IDs: 0", "#16a34a")
 
     # ---------- SUMMARY ----------
     pass_fail: Dict[str, Tuple[bool, bool, str]] = {}
@@ -216,18 +222,39 @@ if submitted:
     st.markdown("---")
     st.subheader("Details")
 
-    def show_sample(title: str, indices: List[int], sample_n: int = 10):
+    def show_sample(title: str, indices: List[int], sample_n: int = 10, red: bool = False):
         if not indices:
             st.write(f"**{title}:** none 🎉")
             return
         st.write(f"**{title}:** {len(indices)}")
         with st.expander(f"Show first {min(sample_n, len(indices))}"):
-            st.write(indices[:sample_n])
-
-    show_sample("Missing ID (item indices)", missing_id_idx, sample_show)
+            subset = indices[:sample_n]
+            if red:
+                # render as a red bullet list
+                st.markdown(
+                    "<ul style='margin-top:0'>"
+                    + "".join(f"<li style='color:#dc2626'>item index {i}</li>" for i in subset)
+                    + "</ul>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.write(subset)
+    
+    # Use it like this:
+    show_sample("Missing ID (item indices)", missing_id_idx, sample_show, red=True)
+    if missing_id_idx:
+    with st.expander("Show first offending rows (index, link, primary image present)"):
+        rows = []
+        for i in missing_id_idx[:sample_show]:
+            link_i = links[i] if i < len(links) else ""
+            # primary image presence
+            prim_i = "yes" if i < len(items) and (gather_primary_image(items[i], spec_name) or "").strip() else "no"
+            rows.append({"index": i, "link": link_i, "primary_image": prim_i})
+        st.dataframe(rows, use_container_width=True)
     show_sample("Missing Product URL (item indices)", missing_link_idx, sample_show)
     show_sample("Missing Primary Image (item indices)", missing_img_idx, sample_show)
     show_sample("Missing Availability (item indices)", missing_avail_idx, sample_show)
+
 
     if dup_id_pairs:
         st.write(f"**Duplicate IDs:** {len(dup_id_pairs)}")
