@@ -118,8 +118,8 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "link_paths": ["./Product_url", "./product_url", "./URL", "./url", "./link"],
         "image_primary_paths": ["./Image_url", "./image_url", "./image", "./imgurl"],
         "required_fields": ["identifier|productid", "name", "product_url", "price", "image_url", "category", "description"],
-        "availability_paths": ["./availability", "./in_stock", "./stock", "./availability_status"],
-        "availability_aliases": ["availability", "in_stock", "stock", "availability_status"],
+        "availability_paths": ["./availability", "./in_stock", "./stock", "./availability_status", "./delivery_time"],
+        "availability_aliases": ["availability", "in_stock", "stock", "availability_status", "delivery_time"],
         "signature_tags": [
             "identifier","productid","name","product_url","price","old_price","image_url","category",
             "category_full","manufacturer","description","delivery_time","stock","in_stock"
