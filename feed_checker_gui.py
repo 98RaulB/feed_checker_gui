@@ -173,8 +173,8 @@ SPECS = [
         make_xpath_items_getter(".//SHOPITEM"),
         ["./ITEM_ID"], ["./URL"], ["./IMGURL"],
         ["item_id", "productname", "url", "imgurl"],
-        availability_xpath=["./AVAILABILITY", "./DELIVERY", "./delivery", "./AVAILABILITY_DESC"],
-        availability_aliases=["availability", "delivery", "availability_desc"],
+        availability_xpath=["./AVAILABILITY", "./DELIVERY", "./delivery", "./AVAILABILITY_DESC", "./DELIVERY_DATE"],
+        availability_aliases=["availability", "delivery", "availability_desc", "delivery_date"],
         signature_tags=[
             "item_id","productname","description","url","imgurl","price","manufacturer",
             "categorytext","availability","delivery","delivery_time"
