@@ -464,7 +464,7 @@ def analyze_feed(feed_bytes: bytes):
 
 # -------------------- UI --------------------
 st.set_page_config(page_title="Feed Checker GUI", layout="wide")
-st.title("🧪 Feed Checker GUI (no-URL-probing)")
+st.title("🧪 FAVI feed checker ")
 st.caption("Detects transformation, validates structure, checks availability, duplicates, URL encoding (spaces & non-ASCII), and flags missing images. If unrecognized, shows the top 2 closest specs with hints.")
 
 with st.form("feed_input"):
