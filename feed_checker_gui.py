@@ -25,16 +25,7 @@ st.set_page_config(page_title="Feed Checker (GUI)", layout="wide")
 st.title("🧪 Feed Checker (GUI)")
 st.caption("Uses the shared rules from feed_specs.py so Checker and Fixer always stay in sync.")
 
-with st.form("input"):
-    url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
-    up = st.file_uploader("…or upload an XML file", type=["xml"])
-    colA, colB = st.columns(2)
-    with colA:
-        sample_show = st.number_input("Show up to N sample issues per category", 1, 50, 10)
-    with colB:
-        stop_on_first_parse_error = st.checkbox("Stop on XML parse error", value=True)
-    submitted = st.form_submit_button("Check feed")
-
+# ---------- Small UI helpers ----------
 def fetch_bytes_from_url(u: str) -> bytes:
     import requests
     r = requests.get(u, headers={"User-Agent":"FeedChecker/GUI"}, timeout=45)
@@ -50,12 +41,36 @@ def verdict_row(label: str, ok: bool, warn: bool = False, extra: str = "") -> Tu
 
 def summarize(pass_fail: Dict[str, Tuple[bool, bool, str]]):
     st.subheader("SUMMARY")
-    rows = []
-    for k, (ok, warn, extra) in pass_fail.items():
-        rows.append(verdict_row(k, ok, warn, extra)[1])
     for k, (ok, warn, extra) in pass_fail.items():
         lbl, text = verdict_row(k, ok, warn, extra)
         st.write(f"- **{lbl}**: {text}")
+
+def status_pill(text: str, color: str = "#16a34a"):  # green default
+    # color: green #16a34a, red #dc2626, gray #6b7280
+    st.markdown(
+        f"""
+        <div style="
+            display:inline-block;
+            padding:6px 12px;
+            border-radius:999px;
+            background:{color};
+            color:white;
+            font-weight:600;
+            font-size:14px;
+        ">{text}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with st.form("input"):
+    url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
+    up = st.file_uploader("…or upload an XML file", type=["xml"])
+    colA, colB = st.columns(2)
+    with colA:
+        sample_show = st.number_input("Show up to N sample issues per category", 1, 50, 10)
+    with colB:
+        stop_on_first_parse_error = st.checkbox("Stop on XML parse error", value=True)
+    submitted = st.form_submit_button("Check feed")
 
 if submitted:
     # 1) Load bytes
@@ -95,21 +110,11 @@ if submitted:
     if xml_ok:
         spec_name = detect_spec(root)
     else:
-        # If parse failed but we continue, detection is meaningless
         spec_name = "UNKNOWN"
 
-    if spec_name == "UNKNOWN":
-        st.error("Transformation detection: UNKNOWN (cannot match any strict signature).")
-        # Even if unknown, try to show a hint about item counts
-        items = list(root.iter()) if xml_ok else []
-        st.stop()
-    else:
-        st.success(f"Transformation detection: **{spec_name}**")
-
-    # 4) Collect items and run checks
-    items = get_item_nodes(root, spec_name)
+    # 4) Collect items & run checks
+    items = get_item_nodes(root, spec_name) if spec_name != "UNKNOWN" else []
     total_items = len(items)
-    st.write(f"Items found: **{total_items}**")
 
     ids: List[str] = []
     links: List[str] = []
@@ -124,7 +129,6 @@ if submitted:
     dup_id_pairs: List[Tuple[int, int, str]] = []
     dup_link_pairs: List[Tuple[int, int, str]] = []
 
-    # Iterate items
     for i, it in enumerate(items):
         pid = (read_id(it, spec_name) or "").strip()
         purl = (read_link(it, spec_name) or "").strip()
@@ -157,7 +161,28 @@ if submitted:
             else:
                 link_first_seen[purl] = i
 
-    # 5) Build results
+    total_dups = len(dup_id_pairs) + len(dup_link_pairs)
+
+    # ---------- TOP ROW (as requested) ----------
+    st.markdown("---")
+    c1, c2, c3 = st.columns([1,1,1], gap="large")
+
+    with c1:
+        if spec_name != "UNKNOWN":
+            status_pill(f"Transformation: {spec_name}", "#16a34a")  # green
+        else:
+            status_pill("Transformation: UNKNOWN", "#6b7280")       # gray
+
+    with c2:
+        status_pill(f"Items: {total_items}", "#16a34a")             # always green
+
+    with c3:
+        if total_dups > 0:
+            status_pill(f"Duplicates: {total_dups}", "#dc2626")     # red if any dup
+        else:
+            status_pill("Duplicates: 0", "#16a34a")                 # green if none
+
+    # ---------- SUMMARY ----------
     pass_fail: Dict[str, Tuple[bool, bool, str]] = {}
 
     # XML syntax
@@ -184,11 +209,10 @@ if submitted:
     # Availability present (warn if missing)
     pass_fail["Availability present"] = (True, len(missing_avail_idx) > 0, f"(missing: {len(missing_avail_idx)})")
 
-    # 6) Summary
     st.markdown("---")
     summarize(pass_fail)
 
-    # 7) Details
+    # ---------- DETAILS ----------
     st.markdown("---")
     st.subheader("Details")
 
@@ -218,6 +242,7 @@ if submitted:
             st.write(dup_link_pairs[:sample_show])
     else:
         st.write("**Duplicate Product URLs:** none 🎉")
+
 
     st.markdown("---")
 st.markdown("© 2025 Raul Bertoldini")
