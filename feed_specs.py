@@ -154,56 +154,47 @@ SPEC: Dict[str, Dict[str, Any]] = {
 }
 
 # -------------------- Detection = mirror of your detectors --------------------
+def _exists(root, xpath: str) -> bool:
+    return root.find(xpath, namespaces=NS) is not None
+
 def detect_spec(root: ET.Element) -> str:
-    """
-    Deterministic detection that mirrors your checker’s intent.
-    Order matters; we short-circuit as soon as a signature matches.
-    """
     root_local = strip_ns(root.tag).lower()
     root_xml = ET.tostring(root, encoding="utf-8", method="xml")
 
-    # Google Atom
+    # --- Google first (as before) ---
+    # Atom
     if any(strip_ns(e.tag).lower() == "entry" for e in root.iter()):
-        # require g: namespace
         if b"base.google.com/ns/1.0" in root_xml:
             return "Google Merchant (g:) Atom"
-
-    # Google RSS
-    if root.find(".//item") is not None:
-        if root_local == "rss" and b"base.google.com/ns/1.0" in root_xml:
+    # RSS
+    if _exists(root, ".//item"):
+        if b"base.google.com/ns/1.0" in root_xml:
             return "Google Merchant (g:) RSS"
 
-    # Heureka
-    if root.find(".//SHOPITEM") is not None and root_local == "shop":
+    # --- Heureka (be tolerant on case) ---
+    if _exists(root, ".//SHOPITEM") or _exists(root, ".//shopitem"):
         return "Heureka strict"
 
-    # Compari family (case-insensitive product container)
-    if root.find(".//product") is not None and root_local == "products":
-        return "Compari / Árukereső / Pazaruvaj (case-insensitive)"
-
-    # Skroutz
-    if root.find(".//product") is not None and root_local == "products":
-        # If you differentiate Skroutz vs Compari by fields, add a stronger condition here.
-        # For parity with your checker, we keep structure identical and let other logic decide where needed.
-        # Default to Skroutz only if explicit Skroutz-signature fields are present:
-        sample = root.find(".//product")
-        if sample is not None and sample.find("./price_with_vat") is not None:
-            return "Skroutz strict"
-
-    # Ceneje/Jeftinije
-    if root.find(".//Item") is not None and root_local in {"items","products","shop"}:
-        # protect against Ceneo (<o>)
-        if root.find(".//o") is None:
-            return "Jeftinije / Ceneje strict"
-
-    # Ceneo
-    if root.find(".//o") is not None and root_local == "offers":
+    # --- CENEO: identify by <o> offers anywhere ---
+    if _exists(root, ".//o"):
         return "Ceneo strict"
 
-    # Fallbacks (Google without strict root)
+    # --- CENEJE / JEFTINIJE: accept Item or item anywhere ---
+    if _exists(root, ".//Item") or _exists(root, ".//item"):
+        return "Jeftinije / Ceneje strict"
+
+    # --- Compari / Skroutz (both use <product>) ---
+    if _exists(root, ".//product"):
+        # Skroutz has price_with_vat typically
+        sample = root.find(".//product", namespaces=NS)
+        if sample is not None and sample.find("./price_with_vat", namespaces=NS) is not None:
+            return "Skroutz strict"
+        return "Compari / Árukereső / Pazaruvaj (case-insensitive)"
+
+    # Fallbacks for Google if namespace exists but structure is odd
     if any(strip_ns(e.tag).lower() == "entry" for e in root.iter()) and b"base.google.com/ns/1.0" in root_xml:
         return "Google Merchant (g:) Atom"
-    if root.find(".//item") is not None and b"base.google.com/ns/1.0" in root_xml:
+    if _exists(root, ".//item") and b"base.google.com/ns/1.0" in root_xml:
         return "Google Merchant (g:) RSS"
 
     return "UNKNOWN"
