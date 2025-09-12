@@ -36,22 +36,58 @@ def _first_local(root: ET.Element, localname: str) -> ET.Element | None:
 def _text(n) -> str:
     return (n.text or "").strip()
 
+def _select_value(elem: ET.Element, path: str) -> str:
+    """
+    Lightweight selector:
+      - '@id'                          -> elem.get('id')
+      - './node/@url'                  -> elem.find('./node', NS).get('url')
+      - './node' or 'node'             -> text of that node (first)
+    """
+    path = path.strip()
+    if not path:
+        return ""
+    # direct attribute of current element
+    if path.startswith("@"):
+        return (elem.get(path[1:]) or "").strip()
+
+    # attribute of a found child: '.../@attr'
+    if "/@" in path:
+        node_path, attr = path.rsplit("/@", 1)
+        n = elem.find(node_path, namespaces=NS)
+        if n is not None:
+            return (n.get(attr) or "").strip()
+        return ""
+
+    # normal element text
+    n = elem.find(path, namespaces=NS)
+    return (n.text or "").strip() if n is not None and n.text else ""
+
 def _first(elem: ET.Element, paths: List[str]) -> str:
     for p in paths:
-        n = elem.find(p, namespaces=NS)
-        if n is not None:
-            t = _text(n)
-            if t:
-                return t
+        t = _select_value(elem, p)
+        if t:
+            return t
     return ""
 
 def _all(elem: ET.Element, paths: List[str]) -> List[str]:
     out: List[str] = []
     for p in paths:
-        for n in elem.findall(p, namespaces=NS):
-            t = _text(n)
-            if t:
-                out.append(t)
+        # collect attributes if '/@' is used, else element texts
+        if "/@" in p:
+            node_path, attr = p.rsplit("/@", 1)
+            for n in elem.findall(node_path, namespaces=NS):
+                v = (n.get(attr) or "").strip()
+                if v:
+                    out.append(v)
+        elif p.startswith("@"):
+            v = (elem.get(p[1:]) or "").strip()
+            if v:
+                out.append(v)
+        else:
+            for n in elem.findall(p, namespaces=NS):
+                v = (n.text or "").strip()
+                if v:
+                    out.append(v)
     return out
 
 def percent_encode_url(url: str) -> str:
@@ -153,18 +189,23 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "expected_root_locals": ["items","products","shop"],
     },
     "Ceneo strict": {
-        "item_paths": [".//o"],
-        "id_paths": ["./id"],
-        "link_paths": ["./url"],
-        "image_primary_paths": ["./imgs/main", "./image"],
-        "required_fields": ["name", "price", "cat", "url"],
-        "availability_paths": ["./availability", "./stock", "./avail"],
-        "availability_aliases": ["availability", "stock", "avail"],
-        "signature_tags": [
-            "id","name","price","cat","url","imgs","main","desc","avail","availability","stock"
-        ],
-        "expected_root_locals": ["offers"],
-    },
+    "item_paths": [".//o"],             # unchanged
+    # read from attributes on <o>
+    "id_paths": ["@id"],
+    "link_paths": ["@url"],
+    # keep element fallback if some feeds use child nodes
+    "image_primary_paths": ["./imgs/main/@url", "./image"],
+    # (optional) gallery if present as <imgs><img url="..."/>
+    "image_gallery_paths": ["./imgs/img/@url"],
+    "required_fields": ["name", "price", "cat", "url"],
+    # availability commonly in attribute 'avail' on <o>
+    "availability_paths": ["@avail", "@availability", "@stock"],
+    "availability_aliases": ["availability", "stock", "avail"],
+    "signature_tags": [
+        "id","name","price","cat","url","imgs","main","desc","avail","availability","stock"
+    ],
+    "expected_root_locals": ["offers"],
+},
 }
 
 # -------------------- Detection = mirror of your detectors --------------------
