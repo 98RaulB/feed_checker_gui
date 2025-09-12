@@ -242,6 +242,10 @@ if submitted:
     
     # Use it like this:
     show_sample("Missing ID (item indices)", missing_id_idx, sample_show, red=True)
+    show_sample("Missing Product URL (item indices)", missing_link_idx, sample_show)
+    show_sample("Missing Primary Image (item indices)", missing_img_idx, sample_show)
+    show_sample("Missing Availability (item indices)", missing_avail_idx, sample_show)
+
     if missing_id_idx:
     with st.expander("Show first offending rows (index, link, primary image present)"):
         rows = []
@@ -251,11 +255,7 @@ if submitted:
             prim_i = "yes" if i < len(items) and (gather_primary_image(items[i], spec_name) or "").strip() else "no"
             rows.append({"index": i, "link": link_i, "primary_image": prim_i})
         st.dataframe(rows, use_container_width=True)
-    show_sample("Missing Product URL (item indices)", missing_link_idx, sample_show)
-    show_sample("Missing Primary Image (item indices)", missing_img_idx, sample_show)
-    show_sample("Missing Availability (item indices)", missing_avail_idx, sample_show)
-
-
+        
     if dup_id_pairs:
         st.write(f"**Duplicate IDs:** {len(dup_id_pairs)}")
         with st.expander("Show first duplicates (old_index, new_index, id)"):
