@@ -8,18 +8,19 @@ try:
 except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
-
-# =========================
-# Utils
-# =========================
+# -------------------- Namespaces --------------------
 NS = {
     "g": "http://base.google.com/ns/1.0",
     "content": "http://purl.org/rss/1.0/modules/content/",
     "atom": "http://www.w3.org/2005/Atom",
 }
 
+# -------------------- Utils --------------------
 def strip_ns(tag: str) -> str:
     return tag.split('}', 1)[1] if isinstance(tag, str) and '}' in tag else tag
+
+def text_of(node) -> str:
+    return (node.text or "").strip()
 
 def percent_encode_url(url: str) -> str:
     if not url:
@@ -30,24 +31,6 @@ def percent_encode_url(url: str) -> str:
     query = quote(parts.query or "", safe="=/?&:+,;@-._~")
     frag  = quote(parts.fragment or "", safe="-._~")
     return urlunsplit((parts.scheme, parts.netloc, path, query, frag))
-
-def normalize_availability(raw: str) -> str:
-    v = (raw or "").strip().lower()
-    if v in {"in stock","instock","available","yes","true","1","on"}:      return "in stock"
-    if v in {"out of stock","outofstock","unavailable","no","false","0","off"}: return "out of stock"
-    if v in {"preorder","pre-order"}: return "preorder"
-    if v in {"backorder","back-order"}: return "backorder"
-    return raw or ""
-
-def warn_if_price_missing_currency(price: str) -> bool:
-    if not price:
-        return False
-    has_alpha = any(c.isalpha() for c in price)
-    has_symbol = any(c in "€$£ Kčzł₺₴₽¥₪" for c in price)
-    return not (has_alpha or has_symbol)
-
-def text_of(node) -> str:
-    return (node.text or "").strip()
 
 def find_first_text(elem: ET.Element, paths: List[str]) -> str:
     for p in paths:
@@ -90,6 +73,21 @@ def find_all_direct_local(elem: ET.Element, localname: str) -> List[str]:
                 out.append(t)
     return out
 
+def normalize_availability(raw: str) -> str:
+    v = (raw or "").strip().lower()
+    if v in {"in stock","instock","available","yes","true","1","on"}:      return "in stock"
+    if v in {"out of stock","outofstock","unavailable","no","false","0","off"}: return "out of stock"
+    if v in {"preorder","pre-order"}: return "preorder"
+    if v in {"backorder","back-order"}: return "backorder"
+    return raw or ""
+
+def warn_if_price_missing_currency(price: str) -> bool:
+    if not price:
+        return False
+    has_alpha = any(c.isalpha() for c in price)
+    has_symbol = any(c in "€$£ Kčzł₺₴₽¥₪" for c in price)
+    return not (has_alpha or has_symbol)
+
 def collect_simple_attrs(item: ET.Element, core_keys: set) -> Dict[str, str]:
     attrs: Dict[str, str] = {}
     for child in list(item):
@@ -103,40 +101,37 @@ def collect_simple_attrs(item: ET.Element, core_keys: set) -> Dict[str, str]:
             attrs[local] = t
     return attrs
 
+# -------------------- Core field maps (tightened) --------------------
+# Keys we know how to map to the neutral model
+CORE_TAGS = {
+    "id","identifier","productid","item_id",
+    "title","name","productname",
+    "description","content","encoded","desc","short_description","long_description","longdesc",
+    "link","url","product_url",
+    "image","image_url","imgurl","image_link","imgs","mainimage",
+    "price","price_vat","price_with_vat","value",
+    "availability","in_stock","stock","availability_status","avail","delivery_date",
+    "brand","manufacturer","mpn","gtin","ean","barcode","sku",
+    "category","categorytext","product_type","google_product_category",
+    "item_group_id","condition",
+    "imgurl_alternative","images","gallery",
+}
 
-# =========================
-# Field maps per spec
-# =========================
-# Each value is a list of *relative* xpath (with namespaces) OR direct-local names handled separately.
-# Keys understood: id,title,link,description,price,availability,availability_hint,brand,mpn,gtin,
-# image_primary,image_gallery,item_group_id,category,product_type,google_product_category,condition
 FIELD_MAPS: Dict[str, Dict[str, List[str]]] = {
+    # --- Deterministic signatures below ---
     "HEUREKA": {
         "id": ["./ITEM_ID"],
         "title": ["./PRODUCTNAME"],
         "link": ["./URL"],
         "description": ["./DESCRIPTION"],
         "price": ["./PRICE_VAT"],
-        "availability_hint": ["./DELIVERY_DATE"],  # rule: < 3 -> in stock
+        "availability_hint": ["./DELIVERY_DATE"],   # < 3 => in stock
         "brand": ["./MANUFACTURER"],
         "mpn": ["./PRODUCTNO"],
         "gtin": ["./EAN"],
         "image_primary": ["./IMGURL"],
         "image_gallery": ["./IMGURL_ALTERNATIVE"],
         "item_group_id": ["./ITEMGROUP_ID"],
-    },
-    "SKROUTZ": {
-        "id": ["./id"],
-        "title": ["./name"],
-        "link": ["./link"],
-        "description": ["./description"],  # if present
-        "price": ["./price_with_vat"],
-        "availability": ["./availability"],
-        "brand": ["./brand"],
-        "mpn": ["./mpn"],
-        "gtin": ["./gtin"],
-        "image_primary": ["./image"],
-        "image_gallery": ["./images/image"],
     },
     "COMPARI": {
         "id": ["./Identifier"],
@@ -150,33 +145,45 @@ FIELD_MAPS: Dict[str, Dict[str, List[str]]] = {
         "image_gallery": ["./Gallery/Image"],
         "category": ["./Category"],
     },
-    "CENEO": {
-        # Ceneo <o> structure varies; map common ones
-        "id": ["./id","./ID","./offer_id","./ITEM_ID"],
-        "title": ["./name","./NAME","./title","./Title","./PRODUCTNAME"],
-        "link": ["./url","./URL","./link"],
-        "description": ["./desc","./DESCRIPTION","./description"],
-        "price": ["./price","./PRICE","./price_with_vat"],
-        "brand": ["./producer","./Brand","./MANUFACTURER"],
-        "gtin": ["./ean","./EAN","./gtin"],
-        "mpn": ["./code","./mpn","./PRODUCTNO"],
-        "image_primary": ["./imgs/main","./image","./IMGURL"],
-        "image_gallery": ["./imgs/img","./images/image","./IMGURL_ALTERNATIVE"],
+    "SKROUTZ": {
+        "id": ["./id"],
+        "title": ["./name"],
+        "link": ["./link"],
+        "description": ["./description"],
+        "price": ["./price_with_vat"],
         "availability": ["./availability"],
+        "brand": ["./brand"],
+        "mpn": ["./mpn"],
+        "gtin": ["./gtin"],
+        "image_primary": ["./image"],
+        "image_gallery": ["./images/image"],
     },
-    "JEFTINIJE": {  # Ceneje/Jeftinije family
-        "id": ["./Id","./ID","./id","./ITEM_ID"],
+    "JEFTINIJE": {  # Ceneje / Jeftinije family
+        "id": ["./Id","./ID","./id"],
         "title": ["./Name","./TITLE","./title","./PRODUCTNAME"],
         "link": ["./Url","./URL","./link","./ProductUrl","./Product_url"],
         "description": ["./Description","./description"],
         "price": ["./Price","./PRICE","./price","./price_with_vat"],
+        "availability": ["./Availability","./availability"],
         "brand": ["./Manufacturer","./Brand","./MANUFACTURER"],
         "gtin": ["./EAN","./ean","./gtin"],
         "mpn": ["./Code","./code","./mpn","./PRODUCTNO"],
         "image_primary": ["./Image","./IMGURL","./Image_url"],
         "image_gallery": ["./Images/Image","./Gallery/Image","./IMGURL_ALTERNATIVE"],
-        "availability": ["./Availability","./availability"],
         "item_group_id": ["./ItemGroupId","./ITEMGROUP_ID"],
+    },
+    "CENEO": {  # offers/o
+        "id": ["./id","./ID","./offer_id"],
+        "title": ["./name","./NAME","./title","./Title","./PRODUCTNAME"],
+        "link": ["./url","./URL","./link"],
+        "description": ["./desc","./DESCRIPTION","./description"],
+        "price": ["./price","./PRICE","./price_with_vat"],
+        "availability": ["./availability"],
+        "brand": ["./producer","./Brand","./MANUFACTURER"],
+        "gtin": ["./ean","./EAN","./gtin"],
+        "mpn": ["./code","./mpn","./PRODUCTNO"],
+        "image_primary": ["./imgs/main","./image","./IMGURL"],
+        "image_gallery": ["./imgs/img","./images/image","./IMGURL_ALTERNATIVE"],
     },
     "GOOGLE_RSS": {
         "id": ["./g:id","./{http://base.google.com/ns/1.0}id"],
@@ -214,37 +221,43 @@ FIELD_MAPS: Dict[str, Dict[str, List[str]]] = {
     },
 }
 
-# product container per spec
 ITEM_PATHS = {
     "HEUREKA": ".//SHOPITEM",
-    "SKROUTZ": ".//product",
     "COMPARI": ".//Product",
-    "CENEO": ".//o",
+    "SKROUTZ": ".//product",
     "JEFTINIJE": ".//Item",
+    "CENEO": ".//o",
     "GOOGLE_RSS": ".//item",
     "GOOGLE_ATOM": ".//{http://www.w3.org/2005/Atom}entry|.//entry",
 }
 
 CRITICAL_KEYS = {"id","title","link","image_primary","price","description"}
 
+# -------------------- Deterministic detection --------------------
+def detect_source(root: ET.Element) -> str:
+    # Root/child signature checks (strict order)
+    if root.find(".//SHOPITEM") is not None:
+        return "HEUREKA"
+    if root.find(".//Product") is not None and strip_ns(root.tag).lower() in {"products","root","xml","export"} or root.find(".//Product") is not None:
+        return "COMPARI"
+    if root.find(".//product") is not None and strip_ns(root.tag).lower() in {"products","mywebstore","xml","export"} or root.find(".//product") is not None:
+        return "SKROUTZ"
+    # Ceneje/Jeftinije: CNJExport or <Item> nodes under a CNJ-like root
+    if strip_ns(root.tag).lower() in {"cnjexport","cnejexport","jeftinije","ceneje"} or root.find(".//Item") is not None:
+        # but make sure it's not a Ceneo <o> feed
+        if root.find(".//o") is None and root.find(".//Item") is not None:
+            return "JEFTINIJE"
+    # Ceneo: offers/o is very characteristic
+    if root.find(".//o") is not None:
+        return "CENEO"
+    # Google Atom vs RSS
+    if any(strip_ns(e.tag).lower()=="entry" for e in root.iter()):
+        return "GOOGLE_ATOM"
+    if root.find(".//item") is not None:
+        return "GOOGLE_RSS"
+    return "UNKNOWN"
 
-# =========================
-# Extraction using field maps
-# =========================
-CORE_TAGS = {
-    "id","identifier","productid","item_id",
-    "title","name","productname",
-    "description","content","encoded","desc","short_description","long_description","longdesc",
-    "link","url","product_url",
-    "image","image_url","imgurl","image_link","imgs","mainimage",
-    "price","price_vat","price_with_vat","value",
-    "availability","in_stock","stock","availability_status","avail","delivery_date",
-    "brand","manufacturer","mpn","gtin","ean","barcode","sku",
-    "category","categorytext","product_type","google_product_category",
-    "item_group_id","condition",
-    "imgurl_alternative","images","gallery",
-}
-
+# -------------------- Extraction engine --------------------
 def gather_images(item: ET.Element, fm: Dict[str,List[str]]) -> List[str]:
     prim = find_first_text(item, fm.get("image_primary", []))
     gallery = find_all_texts(item, fm.get("image_gallery", []))
@@ -254,7 +267,6 @@ def gather_images(item: ET.Element, fm: Dict[str,List[str]]) -> List[str]:
     for u in gallery:
         if u and u not in out:
             out.append(u)
-    # percent encode + dedupe
     enc = []
     for u in out:
         pu = percent_encode_url(u)
@@ -268,7 +280,7 @@ def extract_by_map(root: ET.Element, spec: str) -> List[Dict[str,Any]]:
     if not path:
         return items
 
-    # support alternation in atom entry path
+    # support alternation (Atom entry)
     nodes: List[ET.Element] = []
     if "|" in path:
         p1, p2 = path.split("|", 1)
@@ -279,48 +291,35 @@ def extract_by_map(root: ET.Element, spec: str) -> List[Dict[str,Any]]:
     fm = FIELD_MAPS[spec]
     for it in nodes:
         row: Dict[str,Any] = {}
-        # simple single fields
+        # simple fields
         for key in ["id","title","link","description","price","availability",
                     "brand","mpn","gtin","item_group_id","category",
                     "product_type","google_product_category","condition"]:
-            val = find_first_text(it, fm.get(key, []))
-            row[key] = val or ""
+            row[key] = find_first_text(it, fm.get(key, [])) or ""
 
         # images
         row["images"] = gather_images(it, fm)
 
-        # apply special rules (Heureka DELIVERY_DATE < 3 => in stock)
-        if "availability_hint" in fm and not row.get("availability"):
-            hint = find_first_text(it, fm["availability_hint"])
-            if hint and hint.strip().isdigit():
-                if int(hint.strip()) < 3:
-                    row["availability"] = "in stock"
+        # Heureka special: DELIVERY_DATE < 3 => in stock
+        if spec == "HEUREKA" and not row.get("availability"):
+            hint = find_first_text(it, fm.get("availability_hint", []))
+            if hint and hint.strip().isdigit() and int(hint.strip()) < 3:
+                row["availability"] = "in stock"
 
         # sanitize URL
         row["link"] = percent_encode_url(row.get("link",""))
 
-        # attributes bucket (simple child tags not in core)
+        # generic attributes bucket (non-core children)
         attrs = collect_simple_attrs(it, CORE_TAGS)
         row["attrs"] = attrs
 
         items.append(row)
     return items
 
-
-# =========================
-# Unknown spec handling — similarity & best-effort
-# =========================
-def observed_local_tags(root: ET.Element, item_nodes: List[ET.Element]) -> set:
-    tags = set()
-    for it in item_nodes[:50]:  # sample
-        for ch in list(it):
-            if isinstance(ch.tag, str):
-                tags.add(strip_ns(ch.tag).lower())
-    return tags
-
+# -------------------- Unknown spec fallback (scoring) --------------------
 def candidate_item_nodes(root: ET.Element) -> List[ET.Element]:
-    # try common containers
-    guesses = [".//SHOPITEM",".//product",".//Product",".//item",".//o",".//Item",".//entry",".//{http://www.w3.org/2005/Atom}entry"]
+    guesses = [".//SHOPITEM",".//Product",".//product",".//Item",".//o",".//item",
+               ".//entry",".//{http://www.w3.org/2005/Atom}entry"]
     out: List[ET.Element] = []
     for g in guesses:
         out += root.findall(g, namespaces=NS)
@@ -328,21 +327,30 @@ def candidate_item_nodes(root: ET.Element) -> List[ET.Element]:
         out = list(root)
     return out
 
+def observed_local_tags(item_nodes: List[ET.Element]) -> set:
+    tags = set()
+    for it in item_nodes[:50]:
+        for ch in list(it):
+            if isinstance(ch.tag, str):
+                tags.add(strip_ns(ch.tag).lower())
+    return tags
+
 def score_similarity(seen_tags: set, fmap: Dict[str,List[str]], item_tag_hint: str = "") -> float:
-    # derive expected local tag names from field map paths
+    # expected local tag names
     expected = set()
     for paths in fmap.values():
         for p in paths:
-            p_local = strip_ns(p.split("/")[-1]).lower().strip(".")
-            if p_local:
-                expected.add(p_local)
+            local = strip_ns(p.split("/")[-1]).lower().strip(".")
+            if local:
+                expected.add(local)
+
     if not expected:
         return 0.0
     inter = len(seen_tags & expected)
     union = len(seen_tags | expected)
     jaccard = inter / union if union else 0.0
 
-    # weight critical fields double
+    # weight critical keys
     crit_hits = 0
     for k in CRITICAL_KEYS:
         paths = fmap.get(k, [])
@@ -351,34 +359,28 @@ def score_similarity(seen_tags: set, fmap: Dict[str,List[str]], item_tag_hint: s
             crit_hits += 1
     crit_weight = crit_hits / max(1, len(CRITICAL_KEYS))
 
-    # small bonus if item container likely matches
+    # big bonus for container match (prevents JEFTINIJE vs CENEO confusion)
     bonus = 0.0
     if item_tag_hint:
         hint = item_tag_hint.lower()
-        if hint in {"shopitem","product","item","o","entry"}:
-            bonus = 0.05
+        # map container preferences per spec
+        preferred = {
+            "HEUREKA": {"shopitem"},
+            "COMPARI": {"product"},
+            "SKROUTZ": {"product"},
+            "JEFTINIJE": {"item"},
+            "CENEO": {"o"},
+            "GOOGLE_RSS": {"item"},
+            "GOOGLE_ATOM": {"entry"},
+        }
+        for spec, fav in preferred.items():
+            if hint in fav and fmap is FIELD_MAPS.get(spec):
+                bonus = 0.2  # strong bias
+                break
 
-    return 0.7 * jaccard + 0.25 * crit_weight + bonus
+    return 0.65 * jaccard + 0.3 * crit_weight + bonus
 
-def detect_source(root: ET.Element) -> str:
-    if root.find(".//SHOPITEM") is not None:
-        return "HEUREKA"
-    if root.find(".//product") is not None:
-        return "SKROUTZ"  # tentative
-    if root.find(".//Product") is not None:
-        return "COMPARI"  # tentative
-    if root.find(".//o") is not None:
-        return "CENEO"
-    if any(strip_ns(e.tag).lower()=="entry" for e in root.iter()):
-        return "GOOGLE_ATOM"
-    if root.find(".//item") is not None:
-        return "GOOGLE_RSS"
-    return "UNKNOWN"
-
-
-# =========================
-# Emitters (Google + Skroutz/Compari optional)
-# =========================
+# -------------------- Emitters --------------------
 def emit_google_rss(rows: List[Dict[str, Any]]) -> bytes:
     from xml.sax.saxutils import escape
     out = [
@@ -494,7 +496,6 @@ def emit_compari(rows: List[Dict[str, Any]]) -> bytes:
     out.append("</Products>")
     return ("\n".join(out)).encode("utf-8")
 
-
 EMITTERS = {
     "Google RSS": emit_google_rss,
     "Google Atom": emit_google_atom,
@@ -502,13 +503,10 @@ EMITTERS = {
     "Compari": emit_compari,
 }
 
-
-# =========================
-# Streamlit UI
-# =========================
+# -------------------- UI --------------------
 st.set_page_config(page_title="Feed Fixer (Preview)", layout="wide")
 st.title("🔧 Feed Fixer (Preview)")
-st.caption("Strict IDs. Data-preserving conversion across specs. Will best-effort fix unrecognized feeds and keep all mapped fields.")
+st.caption("Strict IDs. Accurate spec detection (Heureka / Compari / Skroutz / Ceneje-Jeftinije / Ceneo / Google). Fallback fixes unknown feeds with closest map.")
 
 with st.form("input"):
     src_url  = st.text_input("Source feed URL (http/https)", placeholder="https://example.com/feed.xml")
@@ -533,7 +531,7 @@ if submitted:
         else:
             try:
                 import requests
-                r = requests.get(src_url, headers={"User-Agent":"FeedFixer/2.0"}, timeout=45)
+                r = requests.get(src_url, headers={"User-Agent":"FeedFixer/2.1"}, timeout=45)
                 r.raise_for_status()
                 feed_bytes = r.content
                 label = src_url
@@ -553,28 +551,24 @@ if submitted:
             st.error(f"XML parse error: {e}")
             st.stop()
 
-        # Detect source
         detected = detect_source(root)
 
-        # Extract
         if detected in FIELD_MAPS:
             rows = extract_by_map(root, detected)
         else:
-            # Unknown: score all maps and pick best
+            # Unknown → score and choose closest map
             items_guess = candidate_item_nodes(root)
-            seen = observed_local_tags(root, items_guess)
-            scores: List[Tuple[str,float]] = []
+            seen = observed_local_tags(items_guess)
             hint_tag = strip_ns(items_guess[0].tag) if items_guess else ""
+            scored: List[Tuple[str,float]] = []
             for name, fmap in FIELD_MAPS.items():
-                scores.append((name, score_similarity(seen, fmap, hint_tag)))
-            scores.sort(key=lambda x: x[1], reverse=True)
+                scored.append((name, score_similarity(seen, fmap, hint_tag)))
+            scored.sort(key=lambda x: x[1], reverse=True)
 
-            # show top-2 similarities
-            st.warning("Specification not clearly recognized. Showing closest candidates:")
-            top_view = [{"candidate": n, "score": round(s*100, 1)} for n, s in scores[:2]]
-            st.table(top_view)
+            st.warning("Specification not clearly recognized. Closest candidates:")
+            st.table([{"candidate": n, "score": round(s*100,1)} for n, s in scored[:2]])
 
-            best = scores[0][0]
+            best = scored[0][0]
             rows = extract_by_map(root, best)
             detected = f"UNKNOWN → using closest: {best}"
 
@@ -586,16 +580,15 @@ if submitted:
                 st.write(missing[:50])
             st.stop()
 
-        # Normalize textual availability if requested (Heureka delivery_date rule already applied)
+        # Availability normalizer
         if do_avail_norm:
             for r in rows:
                 if r.get("availability"):
                     r["availability"] = normalize_availability(r["availability"])
 
-        # De-duplicate by (id,link)
+        # De-duplicate
         if do_dedupe:
-            seen_pairs = set()
-            deduped = []
+            seen_pairs = set(); deduped = []
             for r in rows:
                 key = (r.get("id",""), r.get("link",""))
                 if key in seen_pairs:
@@ -610,7 +603,7 @@ if submitted:
             rows = rows[:item_limit]
         total_after = len(rows)
 
-        # Metrics / warnings
+        # Metrics
         missing_link = sum(1 for r in rows if not r.get("link"))
         missing_img  = sum(1 for r in rows if not (r.get("images") or []))
         c1, c2, c3, c4 = st.columns(4)
@@ -620,7 +613,7 @@ if submitted:
         c4.metric("Missing primary image", missing_img)
 
         if any(warn_if_price_missing_currency(r.get("price","")) for r in rows if r.get("price")):
-            st.warning("Some prices appear without currency (e.g., '529'). Google requires currency (e.g., '529 CZK').")
+            st.warning("Some prices appear without currency. Google requires a currency (e.g., '529 CZK').")
 
         # Emit
         xml_bytes = EMITTERS[target](rows)
