@@ -19,6 +19,20 @@ NS = {
 def strip_ns(tag: str) -> str:
     return tag.split('}', 1)[1] if isinstance(tag, str) and '}' in tag else tag
 
+def _exists_local(root: ET.Element, localname: str) -> bool:
+    lname = localname.lower()
+    for e in root.iter():
+        if isinstance(e.tag, str) and strip_ns(e.tag).lower() == lname:
+            return True
+    return False
+
+def _first_local(root: ET.Element, localname: str) -> ET.Element | None:
+    lname = localname.lower()
+    for e in root.iter():
+        if isinstance(e.tag, str) and strip_ns(e.tag).lower() == lname:
+            return e
+    return None
+
 def _text(n) -> str:
     return (n.text or "").strip()
 
@@ -158,43 +172,41 @@ def _exists(root, xpath: str) -> bool:
     return root.find(xpath, namespaces=NS) is not None
 
 def detect_spec(root: ET.Element) -> str:
-    root_local = strip_ns(root.tag).lower()
     root_xml = ET.tostring(root, encoding="utf-8", method="xml")
 
-    # --- Google first (as before) ---
-    # Atom
+    # Google Atom
     if any(strip_ns(e.tag).lower() == "entry" for e in root.iter()):
         if b"base.google.com/ns/1.0" in root_xml:
             return "Google Merchant (g:) Atom"
-    # RSS
+    # Google RSS
     if _exists(root, ".//item"):
         if b"base.google.com/ns/1.0" in root_xml:
             return "Google Merchant (g:) RSS"
 
-    # --- Heureka (be tolerant on case) ---
-    if _exists(root, ".//SHOPITEM") or _exists(root, ".//shopitem"):
+    # Heureka: SHOPITEM (case-insensitive)
+    if _exists(root, ".//SHOPITEM") or _exists_local(root, "shopitem"):
         return "Heureka strict"
 
-    # --- CENEO: identify by <o> offers anywhere ---
-    if _exists(root, ".//o"):
+    # CENEO: <o> anywhere
+    if _exists(root, ".//o") or _exists_local(root, "o"):
         return "Ceneo strict"
 
-    # --- CENEJE / JEFTINIJE: accept Item or item anywhere ---
-    if _exists(root, ".//Item") or _exists(root, ".//item"):
+    # CENEJE / JEFTINIJE: <Item> or <item> anywhere
+    if _exists(root, ".//Item") or _exists_local(root, "item"):
         return "Jeftinije / Ceneje strict"
 
-    # --- Compari / Skroutz (both use <product>) ---
-    if _exists(root, ".//product"):
-        # Skroutz has price_with_vat typically
-        sample = root.find(".//product", namespaces=NS)
-        if sample is not None and sample.find("./price_with_vat", namespaces=NS) is not None:
+    # Compari / Skroutz: look for <product> (case-insensitive). Skroutz has price_with_vat.
+    if _exists(root, ".//product") or _exists_local(root, "product"):
+        sample = root.find(".//product", namespaces=NS) or _first_local(root, "product")
+        if sample is not None and (sample.find("./price_with_vat", namespaces=NS) is not None or
+                                   any(strip_ns(c.tag).lower()=="price_with_vat" for c in list(sample))):
             return "Skroutz strict"
         return "Compari / Árukereső / Pazaruvaj (case-insensitive)"
 
-    # Fallbacks for Google if namespace exists but structure is odd
+    # Fallbacks for odd Google
     if any(strip_ns(e.tag).lower() == "entry" for e in root.iter()) and b"base.google.com/ns/1.0" in root_xml:
         return "Google Merchant (g:) Atom"
-    if _exists(root, ".//item") and b"base.google.com/ns/1.0" in root_xml:
+    if (_exists(root, ".//item") or _exists_local(root, "item")) and b"base.google.com/ns/1.0" in root_xml:
         return "Google Merchant (g:) RSS"
 
     return "UNKNOWN"
@@ -226,10 +238,32 @@ def gather_gallery(elem: ET.Element, spec_name: str, do_percent_encode: bool = T
     return dedup
 
 def get_item_nodes(root: ET.Element, spec_name: str) -> List[ET.Element]:
+    paths = SPEC.get(spec_name, {}).get("item_paths", [])
     nodes: List[ET.Element] = []
-    for p in SPEC.get(spec_name, {}).get("item_paths", []):
+    # 1) Try configured XPaths (fast path)
+    for p in paths:
         nodes += root.findall(p, namespaces=NS)
-    return nodes
+    if nodes:
+        return nodes
+
+    # 2) Case-insensitive fallback by localname (from last path token)
+    desired: List[str] = []
+    for p in paths:
+        last = p.split("/")[-1]  # e.g., "product", "Item", "{ns}entry", "o"
+        last = last.strip(".")
+        last_local = strip_ns(last).lower()
+        if last_local:
+            desired.append(last_local)
+
+    if not desired:
+        return nodes
+
+    out: List[ET.Element] = []
+    want = set(desired)
+    for e in root.iter():
+        if isinstance(e.tag, str) and strip_ns(e.tag).lower() in want:
+            out.append(e)
+    return out
 
 def read_id(elem: ET.Element, spec_name: str) -> str:
     return _first(elem, SPEC.get(spec_name, {}).get("id_paths", []))
