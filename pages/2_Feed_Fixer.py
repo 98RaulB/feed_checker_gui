@@ -3,17 +3,13 @@ import hashlib
 from typing import Dict, Any, List
 import streamlit as st
 
-# Safe XML parsing (fallback if defusedxml missing)
 try:
     from defusedxml import ElementTree as ET  # type: ignore
 except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
-
-# ---------- Helpers ----------
 def strip_ns(tag: str) -> str:
     return tag.split('}', 1)[1] if '}' in tag else tag
-
 
 def first_text(elem, xpaths: List[str]) -> str:
     for xp in xpaths:
@@ -23,7 +19,6 @@ def first_text(elem, xpaths: List[str]) -> str:
             if t:
                 return t
     return ""
-
 
 def percent_encode_url(url: str) -> str:
     if not url:
@@ -35,10 +30,8 @@ def percent_encode_url(url: str) -> str:
     frag = quote(parts.fragment, safe="-._~")
     return urlunsplit((parts.scheme, parts.netloc, path, query, frag))
 
-
 def synth_id_from_url(u: str) -> str:
     return hashlib.sha1((u or "").encode("utf-8")).hexdigest()[:16]
-
 
 def normalize_availability(raw: str) -> str:
     v = (raw or "").strip().lower()
@@ -48,8 +41,6 @@ def normalize_availability(raw: str) -> str:
         return "out of stock"
     return raw or ""
 
-
-# ---------- Neutral extractor ----------
 def extract_items_neutral(root) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     candidates = []
@@ -58,36 +49,33 @@ def extract_items_neutral(root) -> List[Dict[str, Any]]:
     candidates += root.findall(".//item")
     candidates += [e for e in root.iter() if strip_ns(e.tag).lower() == "entry"]
     candidates += root.findall(".//SHOPITEM")
-    candidates += root.findall(".//o")  # Ceneo
+    candidates += root.findall(".//o")
     if not candidates:
         candidates = list(root)
-
     for it in candidates:
         idv = first_text(it, [
-            "./id", "./ID", "./Identifier", "./identifier", "./ProductId", "./productid",
-            "./ITEM_ID", "./{http://base.google.com/ns/1.0}id", "./g:id",
+            "./id","./ID","./Identifier","./identifier","./ProductId","./productid",
+            "./ITEM_ID","./{http://base.google.com/ns/1.0}id","./g:id",
         ])
         link = first_text(it, [
-            "./link", "./Link", "./url", "./URL", "./product_url", "./Product_url",
-            "./{http://base.google.com/ns/1.0}link", "./g:link",
+            "./link","./Link","./url","./URL","./product_url","./Product_url",
+            "./{http://base.google.com/ns/1.0}link","./g:link",
         ])
         image = first_text(it, [
-            "./image", "./Image", "./image_url", "./Image_url", "./IMGURL", "./imgs/main", "./mainImage",
-            "./{http://base.google.com/ns/1.0}image_link", "./g:image_link",
+            "./image","./Image","./image_url","./Image_url","./IMGURL","./imgs/main","./mainImage",
+            "./{http://base.google.com/ns/1.0}image_link","./g:image_link",
         ])
-        title = first_text(it, ["./title", "./Title", "./name", "./Name", "./PRODUCTNAME", "./productname"])
-        desc = first_text(it, ["./description", "./Description"])
-        price = first_text(it, ["./price", "./PRICE", "./value", "./price_with_vat", "./Price"])
+        title = first_text(it, ["./title","./Title","./name","./Name","./PRODUCTNAME","./productname"])
+        desc  = first_text(it, ["./description","./Description"])
+        price = first_text(it, ["./price","./PRICE","./value","./price_with_vat","./Price"])
         avail = first_text(it, [
-            "./availability", "./in_stock", "./stock", "./availability_status", "./AVAILABILITY", "./avail",
-            "./{http://base.google.com/ns/1.0}availability", "./g:availability",
+            "./availability","./in_stock","./stock","./availability_status","./AVAILABILITY","./avail",
+            "./{http://base.google.com/ns/1.0}availability","./g:availability",
         ])
-
-        link = percent_encode_url(link) if link else ""
+        link  = percent_encode_url(link) if link else ""
         image = percent_encode_url(image) if image else ""
         if not idv and link:
             idv = synth_id_from_url(link)
-
         items.append({
             "id": idv or "",
             "title": title or "",
@@ -99,51 +87,37 @@ def extract_items_neutral(root) -> List[Dict[str, Any]]:
         })
     return items
 
-
-# ---------- Emitters ----------
 def emit_skroutz(rows: List[Dict[str, Any]]) -> bytes:
     from xml.sax.saxutils import escape
     out = ['<?xml version="1.0" encoding="UTF-8"?>', "<products>"]
     for r in rows:
         out.append("<product>")
-        if r["id"]:
-            out.append(f"<id>{escape(r['id'])}</id>")
-        if r["title"]:
-            out.append(f"<name>{escape(r['title'])}</name>")
-        if r["link"]:
-            out.append(f"<link>{escape(r['link'])}</link>")
-        if r["image"]:
-            out.append(f"<image>{escape(r['image'])}</image>")
-        if r["price"]:
-            out.append(f"<price_with_vat>{escape(r['price'])}</price_with_vat>")
+        if r["id"]:    out.append(f"<id>{escape(r['id'])}</id>")
+        if r["title"]: out.append(f"<name>{escape(r['title'])}</name>")
+        if r["link"]:  out.append(f"<link>{escape(r['link'])}</link>")
+        if r["image"]: out.append(f"<image>{escape(r['image'])}</image>")
+        if r["price"]: out.append(f"<price_with_vat>{escape(r['price'])}</price_with_vat>")
         if r["availability"]:
             out.append(f"<availability>{escape(r['availability'])}</availability>")
         out.append("</product>")
     out.append("</products>")
     return ("\n".join(out)).encode("utf-8")
 
-
 def emit_compari(rows: List[Dict[str, Any]]) -> bytes:
     from xml.sax.saxutils import escape
     out = ['<?xml version="1.0" encoding="UTF-8"?>', "<Products>"]
     for r in rows:
         out.append("<Product>")
-        if r["id"]:
-            out.append(f"<Identifier>{escape(r['id'])}</Identifier>")
-        if r["title"]:
-            out.append(f"<Name>{escape(r['title'])}</Name>")
-        if r["link"]:
-            out.append(f"<Product_url>{escape(r['link'])}</Product_url>")
-        if r["image"]:
-            out.append(f"<Image_url>{escape(r['image'])}</Image_url>")
-        if r["price"]:
-            out.append(f"<Price>{escape(r['price'])}</Price>")
+        if r["id"]:    out.append(f"<Identifier>{escape(r['id'])}</Identifier>")
+        if r["title"]: out.append(f"<Name>{escape(r['title'])}</Name>")
+        if r["link"]:  out.append(f"<Product_url>{escape(r['link'])}</Product_url>")
+        if r["image"]: out.append(f"<Image_url>{escape(r['image'])}</Image_url>")
+        if r["price"]: out.append(f"<Price>{escape(r['price'])}</Price>")
         if r["availability"]:
             out.append(f"<availability>{escape(r['availability'])}</availability>")
         out.append("</Product>")
     out.append("</Products>")
     return ("\n".join(out)).encode("utf-8")
-
 
 def emit_google_rss(rows: List[Dict[str, Any]]) -> bytes:
     from xml.sax.saxutils import escape
@@ -157,53 +131,37 @@ def emit_google_rss(rows: List[Dict[str, Any]]) -> bytes:
     ]
     for r in rows:
         out.append("<item>")
-        if r["id"]:
-            out.append(f"<g:id>{escape(r['id'])}</g:id>")
-        if r["title"]:
-            out.append(f"<title>{escape(r['title'])}</title>")
-        if r["description"]:
-            out.append(f"<description>{escape(r['description'])}</description>")
-        if r["link"]:
-            out.append(f"<link>{escape(r['link'])}</link>")
-        if r["image"]:
-            out.append(f"<g:image_link>{escape(r['image'])}</g:image_link>")
-        if r["price"]:
-            out.append(f"<g:price>{escape(r['price'])}</g:price>")
-        if r["availability"]:
-            out.append(f"<g:availability>{escape(r['availability'])}</g:availability>")
+        if r["id"]:            out.append(f"<g:id>{escape(r['id'])}</g:id>")
+        if r["title"]:         out.append(f"<title>{escape(r['title'])}</title>")
+        if r["description"]:   out.append(f"<description>{escape(r['description'])}</description>")
+        if r["link"]:          out.append(f"<link>{escape(r['link'])}</link>")
+        if r["image"]:         out.append(f"<g:image_link>{escape(r['image'])}</g:image_link>")
+        if r["price"]:         out.append(f"<g:price>{escape(r['price'])}</g:price>")
+        if r["availability"]:  out.append(f"<g:availability>{escape(r['availability'])}</g:availability>")
         out.append("</item>")
     out.append("</channel></rss>")
     return ("\n".join(out)).encode("utf-8")
-
 
 def emit_google_atom(rows: List[Dict[str, Any]]) -> bytes:
     from xml.sax.saxutils import escape
     out = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:g="http://base.google.com/ns/1.0">',
-        '<title>Fixed Feed</title>',
+        "<title>Fixed Feed</title>",
         '<link rel="self" href="https://feeds.example"/>',
     ]
     for r in rows:
         out.append("<entry>")
-        if r["id"]:
-            out.append(f"<g:id>{escape(r['id'])}</g:id>")
-        if r["title"]:
-            out.append(f"<title>{escape(r['title'])}</title>")
-        if r["description"]:
-            out.append(f"<content type=\"html\">{escape(r['description'])}</content>")
-        if r["link"]:
-            out.append(f"<g:link>{escape(r['link'])}</g:link>")
-        if r["image"]:
-            out.append(f"<g:image_link>{escape(r['image'])}</g:image_link>")
-        if r["price"]:
-            out.append(f"<g:price>{escape(r['price'])}</g:price>")
-        if r["availability"]:
-            out.append(f"<g:availability>{escape(r['availability'])}</g:availability>")
+        if r["id"]:            out.append(f"<g:id>{escape(r['id'])}</g:id>")
+        if r["title"]:         out.append(f"<title>{escape(r['title'])}</title>")
+        if r["description"]:   out.append(f"<content type=\"html\">{escape(r['description'])}</content>")
+        if r["link"]:          out.append(f"<g:link>{escape(r['link'])}</g:link>")
+        if r["image"]:         out.append(f"<g:image_link>{escape(r['image'])}</g:image_link>")
+        if r["price"]:         out.append(f"<g:price>{escape(r['price'])}</g:price>")
+        if r["availability"]:  out.append(f"<g:availability>{escape(r['availability'])}</g:availability>")
         out.append("</entry>")
     out.append("</feed>")
     return ("\n".join(out)).encode("utf-8")
-
 
 EMITTERS = {
     "Skroutz": emit_skroutz,
@@ -212,8 +170,6 @@ EMITTERS = {
     "Google Atom": emit_google_atom,
 }
 
-
-# ---------- UI ----------
 st.set_page_config(page_title="Feed Fixer (Preview)", layout="wide")
 st.title("🔧 Feed Fixer (Preview)")
 st.caption("Transform a source feed to a chosen specification and download the fixed XML.")
@@ -302,7 +258,4 @@ if submitted:
         st.download_button("⬇️ Download fixed feed", xml_bytes, file_name=dl_name, mime="application/xml")
 
         st.info("Local preview only. When ready, publish the XML to a stable URL (e.g., https://www.s.favi.<tld>/fixed/<shop>.xml).")
-
-      st.markdown("---")
-st.caption("© 2025 Raul Bertoldini")
 
