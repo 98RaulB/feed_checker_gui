@@ -153,6 +153,15 @@ if submitted:
     missing_avail_idx: List[int] = []
     bad_url_idx: List[int] = []
     bad_img_idx: List[int] = []
+    any_warnings = (
+        len(missing_link_idx) > 0
+        or len(missing_img_idx) > 0
+        or len(missing_avail_idx) > 0
+        or len(bad_url_idx) > 0
+        or len(bad_img_idx) > 0
+    )
+
+
 
     # Track duplicates with first-seen index
     id_first_seen: Dict[str, int] = {}
@@ -209,7 +218,8 @@ if submitted:
 
     # ---------- TOP ROW ----------
     st.markdown("---")
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 1], gap="large")
+    c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1], gap="large")
+
 
     with c1:
         if spec_name != "UNKNOWN":
@@ -231,6 +241,13 @@ if submitted:
             status_pill(f"Missing IDs: {len(missing_id_idx)}", "#dc2626")  # RED if any
         else:
             status_pill("Missing IDs: 0", "#16a34a")
+
+    with c5:
+    if any_warnings:
+        status_pill("Warnings present ⚠️", "#f59e0b")   # amber/orange
+    else:
+        status_pill("No warnings", "#16a34a")            # green
+
 
     # ---------- SUMMARY ----------
     pass_fail: Dict[str, Tuple[bool, bool, str]] = {}
