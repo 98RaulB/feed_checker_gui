@@ -5,7 +5,7 @@ import re
 import html
 import streamlit as st
 
-# Reuse your spec/rules so checker & fixer stay in sync
+# Reuse your shared spec/rules so Checker & Fixer stay in sync
 from feed_specs import (
     NS,
     SPEC,
@@ -25,17 +25,35 @@ try:
 except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
+
+# ========================= Streamlit setup =========================
 st.set_page_config(page_title="Feed Fixer", layout="wide")
 st.title("🛠️ Feed Fixer")
-st.caption("Detects known formats, merges mixed feeds, lets you map unknown tags, and outputs Google Merchant RSS (or Heureka if chosen).")
+st.caption("Detects known formats, merges mixed feeds, lets you map unknown tags, and outputs Google Merchant RSS (or Heureka when selected).")
 
-# -------------------- Small helpers --------------------
-def fetch_bytes_from_url(u: str) -> bytes:
-    import requests
-    r = requests.get(u, headers={"User-Agent": "FeedFixer/GUI"}, timeout=60)
-    r.raise_for_status()
-    return r.content
+# -------- Session state defaults (prevents resets on rerun) --------
+ss = st.session_state
+_defaults = {
+    "feed_bytes": None,
+    "src_label": "",
+    "root": None,
+    "spec_name": "UNKNOWN",
+    "parsed_items": [],
+    "merged_entries": [],
+    "all_unmapped": {},      # tag -> set of example values
+    "tag_map": {},           # user mapping: input_tag -> google_field
+    "dup_policy": "Keep first only (drop later duplicates)",
+    "shop_title": "FeedFixer Output",
+    "default_currency": "EUR",
+    "last_output": None,     # bytes
+    "last_mime": "",
+    "last_filename": "",
+}
+for k, v in _defaults.items():
+    ss.setdefault(k, v)
 
+
+# ========================= Small helpers =========================
 def status_pill(text: str, color: str = "#16a34a"):
     st.markdown(
         f"""
@@ -115,10 +133,12 @@ def collect_all_item_kv(elem: ET.Element) -> Dict[str, List[str]]:
         if v:
             out.setdefault(lname, []).append(v)
 
+        # attributes that look like URLs
         for _, a in (child.attrib or {}).items():
             if is_urlish(a):
                 out.setdefault(lname, []).append(a)
 
+        # go one level deeper (e.g., Ceneo <imgs><main url=.../>)
         for gchild in list(child):
             if not isinstance(gchild.tag, str):
                 continue
@@ -131,7 +151,8 @@ def collect_all_item_kv(elem: ET.Element) -> Dict[str, List[str]]:
                     out.setdefault(glname, []).append(a2)
     return out
 
-# Google Merchant target fields (subset that’s most useful)
+
+# Google Merchant target fields we support
 G_FIELDS = [
     "id","item_group_id","title","description","link","image_link","additional_image_link",
     "price","availability","brand","mpn","gtin","condition",
@@ -182,6 +203,7 @@ SYNONYMS: Dict[str, str] = {
     "material":"material","materiál":"material",
     "size":"size","velikost":"size","rozmiar":"size","größe":"size",
 }
+
 
 def auto_merge_to_google(item: ET.Element, spec_name: str, default_currency: str) -> Tuple[Dict[str, Any], Dict[str, List[str]]]:
     """
@@ -245,6 +267,7 @@ def auto_merge_to_google(item: ET.Element, spec_name: str, default_currency: str
 
     return g, unmapped
 
+
 def build_google_rss(entries: List[Dict[str, Any]], shop_title: str = "FeedFixer Output") -> bytes:
     def esc(s: str) -> str:
         return html.escape(s or "")
@@ -293,12 +316,13 @@ def build_google_rss(entries: List[Dict[str, Any]], shop_title: str = "FeedFixer
     lines.append("</rss>")
     return "\n".join(lines).encode("utf-8")
 
+
 def build_heureka(entries: List[Dict[str, Any]]) -> bytes:
     """
     Minimal, clean Heureka output from the unified entries.
     Using:
-      ITEM_ID, PRODUCTNAME, URL, IMGURL, PRICE_VAT, MANUFACTURER, DESCRIPTION
-    Falls back when fields are missing; drops items with no ID.
+      ITEM_ID, PRODUCTNAME, URL, IMGURL, PRICE_VAT, MANUFACTURER, DESCRIPTION, IMGURL_ALTERNATIVE
+    Drops items with no ID.
     """
     def esc(s: str) -> str:
         return html.escape(s or "")
@@ -341,108 +365,107 @@ def build_heureka(entries: List[Dict[str, Any]]) -> bytes:
     lines.append("</SHOP>")
     return "\n".join(lines).encode("utf-8")
 
-# -------------------- Sidebar options --------------------
+
+# ========================= Sidebar options =========================
 with st.sidebar:
     st.header("Output options")
-    shop_title = st.text_input("Feed title", value="FeedFixer Output")
-    default_currency = st.text_input("Default currency (for price parsing)", value="EUR")
+    ss.shop_title = st.text_input("Feed title", value=ss.shop_title)
+    ss.default_currency = st.text_input("Default currency (for price parsing)", value=ss.default_currency)
     st.caption("IDs are mandatory: items without ID will be dropped from the output.")
 
-# -------------------- Input form --------------------
+
+# ========================= Load form =========================
 with st.form("input"):
     url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
     up = st.file_uploader("…or upload an XML file", type=["xml"])
-    sample_show = st.number_input("Show up to N sample issues per category", 1, 50, 10)
     submitted = st.form_submit_button("Load")
 
-if not submitted:
-    st.stop()
-
-# -------------------- Load bytes --------------------
-xml_bytes = None
-src_label = None
-if url.strip():
-    if not url.lower().startswith(("http://","https://")):
-        st.error("URL must start with http:// or https://")
-        st.stop()
+if submitted:
+    # fetch/save to session
     try:
-        xml_bytes = fetch_bytes_from_url(url.strip())
-        src_label = url.strip()
+        if url.strip():
+            import requests
+            r = requests.get(url.strip(), headers={"User-Agent": "FeedFixer/GUI"}, timeout=60)
+            r.raise_for_status()
+            ss.feed_bytes = r.content
+            ss.src_label = url.strip()
+        elif up is not None:
+            ss.feed_bytes = up.read()
+            ss.src_label = up.name
+        else:
+            st.warning("Provide a URL or upload a file.")
+            st.stop()
     except Exception as e:
         st.error(f"Failed to download URL: {e}")
         st.stop()
-elif up is not None:
-    xml_bytes = up.read()
-    src_label = up.name
-else:
-    st.warning("Provide a URL or upload a file.")
+
+    # parse
+    try:
+        ss.root = ET.fromstring(ss.feed_bytes)
+        st.success("XML syntax: OK")
+    except ET.ParseError as e:
+        ss.root = None
+        st.error(f"XML syntax: ERROR — {e}")
+        st.stop()
+
+    # detect & extract
+    ss.spec_name = detect_spec(ss.root)
+    items = get_item_nodes(ss.root, ss.spec_name) if ss.spec_name != "UNKNOWN" else []
+
+    merged: List[Dict[str, Any]] = []
+    all_unmapped: Dict[str, Set[str]] = {}
+    missing_ids = 0
+    for it in items:
+        g, unmapped = auto_merge_to_google(it, ss.spec_name, ss.default_currency)
+        if not (g.get("id") or "").strip():
+            missing_ids += 1
+        for k, vals in unmapped.items():
+            if not vals:
+                continue
+            ex = next((v for v in vals if v.strip()), "")
+            if ex:
+                all_unmapped.setdefault(k, set()).add(ex)
+        merged.append(g)
+
+    ss.parsed_items = items
+    ss.merged_entries = merged
+    ss.all_unmapped = all_unmapped
+    ss.tag_map = {}  # reset mappings on new load
+    ss.last_output = None
+    ss.last_mime = ""
+    ss.last_filename = ""
+
+
+# If nothing loaded yet, stop; otherwise continue with stored state
+if ss.root is None:
+    st.info("Load a feed to begin.")
     st.stop()
 
-st.write(f"**Source:** `{src_label}`")
 
-# -------------------- Parse --------------------
-try:
-    root = ET.fromstring(xml_bytes)
-    st.success("XML syntax: OK")
-except ET.ParseError as e:
-    st.error(f"XML syntax: ERROR — {e}")
-    st.stop()
-
-# -------------------- Detect & score --------------------
-spec_name = detect_spec(root)
-top2 = top2_closest_specs(root)
-
+# ========================= Header & detection =========================
+st.write(f"**Source:** `{ss.src_label}`")
 st.markdown("---")
-c1, c2 = st.columns([2,3])
+c1, c2 = st.columns([2, 3])
 with c1:
-    if spec_name != "UNKNOWN":
-        status_pill(f"Detected: {spec_name}", "#16a34a")
+    if ss.spec_name != "UNKNOWN":
+        status_pill(f"Detected: {ss.spec_name}", "#16a34a")
     else:
         status_pill("Detected: UNKNOWN or MIXED", "#6b7280")
 with c2:
+    top2 = top2_closest_specs(ss.root)
     st.write("Closest formats:")
     for name, found, total in top2:
         pct = f"{(100.0*found/max(1,total)):.0f}%"
         st.write(f"- **{name}**: {found}/{total} signature tags ({pct})")
 
-# -------------------- Extract items, auto-merge, collect unmapped --------------------
-items = get_item_nodes(root, spec_name) if spec_name != "UNKNOWN" else []
+st.write(f"Items found: **{len(ss.parsed_items)}**")
 
-merged: List[Dict[str, Any]] = []
-all_unmapped: Dict[str, Set[str]] = {}
-missing_ids = 0
 
-for it in items:
-    g, unmapped = auto_merge_to_google(it, spec_name, default_currency)
-    if not (g.get("id") or "").strip():
-        missing_ids += 1
-    for k, vals in unmapped.items():
-        if not vals:
-            continue
-        ex = next((v for v in vals if v.strip()), "")
-        if ex:
-            all_unmapped.setdefault(k, set()).add(ex)
-    merged.append(g)
-
-# ---------- persist parsing state so UI actions don't reset ----------
-st.session_state.parsed_items = items
-st.session_state.merged_entries = merged
-st.session_state.all_unmapped = all_unmapped
-st.session_state.spec_name = spec_name
-st.session_state.shop_title = shop_title
-st.session_state.default_currency = default_currency
-
-if missing_ids > 0:
-    st.error(f"{missing_ids} item(s) missing ID. They will be dropped unless you map a tag to g:id below.")
-
-# -------------------- Mapping UI for unknown tags --------------------
+# ========================= Mapping UI =========================
 st.markdown("---")
 st.subheader("Map unknown tags to Google fields (optional, keeps data)")
 
-if "tag_map" not in st.session_state:
-    st.session_state.tag_map = {}
-
-if not all_unmapped:
+if not ss.all_unmapped:
     st.write("No unknown fields found 🎉")
 else:
     st.caption("Pick where each INPUT tag should go. Unmapped tags will be ignored.")
@@ -450,29 +473,28 @@ else:
 
     cols = st.columns(3)
     i = 0
-    for tag, examples in sorted(all_unmapped.items()):
+    for tag, examples in sorted(ss.all_unmapped.items()):
         with cols[i % 3]:
             example = next(iter(examples))
+            default_idx = TARGETS.index(ss.tag_map.get(tag, "(ignore)")) if ss.tag_map.get(tag) in TARGETS else 0
             choice = st.selectbox(
                 f"{tag}  \n`e.g. {example[:80]}{'…' if len(example)>80 else ''}`",
                 TARGETS,
-                index=TARGETS.index(st.session_state.tag_map.get(tag, "(ignore)"))
-                if st.session_state.tag_map.get(tag) in TARGETS else 0,
+                index=default_idx,
                 key=f"map_{tag}",
             )
             if choice and choice != "(ignore)":
-                st.session_state.tag_map[tag] = choice
-            elif tag in st.session_state.tag_map:
-                # user reset to ignore
-                del st.session_state.tag_map[tag]
+                ss.tag_map[tag] = choice
+            elif tag in ss.tag_map:
+                del ss.tag_map[tag]
         i += 1
 
-# -------------------- Apply mapping to merged entries --------------------
-if st.session_state.tag_map:
+# Apply mapping to entries
+if ss.tag_map:
     updated: List[Dict[str, Any]] = []
-    for it, g in zip(st.session_state.parsed_items, st.session_state.merged_entries):
+    for it, g in zip(ss.parsed_items, ss.merged_entries):
         bag = collect_all_item_kv(it)
-        for src_tag, tgt in st.session_state.tag_map.items():
+        for src_tag, tgt in ss.tag_map.items():
             vals = bag.get(src_tag, [])
             if not vals:
                 continue
@@ -489,24 +511,24 @@ if st.session_state.tag_map:
             elif tgt == "price":
                 last = next((v for v in reversed(vals) if v.strip()), "")
                 if last:
-                    g["price"] = as_price(last, st.session_state.default_currency)
+                    g["price"] = as_price(last, ss.default_currency)
             else:
                 if not g.get(tgt):
                     g[tgt] = vals[0]
         updated.append(g)
-    st.session_state.merged_entries = updated
+    ss.merged_entries = updated
 
-# -------------------- Duplicate handling (ask user) --------------------
+
+# ========================= Duplicates policy =========================
 st.markdown("---")
 st.subheader("Duplicates")
 
-# compute duplicates by id and by link (encoded)
 id_first: Dict[str, int] = {}
 link_first: Dict[str, int] = {}
 dup_ids: List[Tuple[int, int, str]] = []
 dup_links: List[Tuple[int, int, str]] = []
 
-for idx, e in enumerate(st.session_state.merged_entries):
+for idx, e in enumerate(ss.merged_entries):
     pid = (e.get("id") or "").strip()
     purl = (e.get("link") or "").strip()
     if pid:
@@ -523,18 +545,16 @@ for idx, e in enumerate(st.session_state.merged_entries):
 dup_total = len(dup_ids) + len(dup_links)
 if dup_total > 0:
     st.warning(f"Found duplicates: IDs={len(dup_ids)}, Links={len(dup_links)}")
-    policy = st.radio(
-        "When duplicates are present, choose an action:",
-        options=["Keep first only (drop later duplicates)", "Keep all"],
-        index=0,
-        horizontal=False,
-        key="dup_policy",
+    ss.dup_policy = st.radio(
+        "When duplicates are present:",
+        ["Keep first only (drop later duplicates)", "Keep all"],
+        index=0 if ss.dup_policy.startswith("Keep first") else 1,
+        key="dup_policy_radio",
     )
 else:
-    st.write("No duplicates found 🎉")
-    st.session_state.dup_policy = "Keep all"
+    st.info("No duplicates found.")
+    ss.dup_policy = "Keep all"
 
-# Apply policy preview
 def apply_duplicates_policy(entries: List[Dict[str, Any]], policy: str) -> List[Dict[str, Any]]:
     if policy != "Keep first only (drop later duplicates)":
         return entries
@@ -544,7 +564,7 @@ def apply_duplicates_policy(entries: List[Dict[str, Any]], policy: str) -> List[
     for e in entries:
         pid = (e.get("id") or "").strip()
         purl = (e.get("link") or "").strip()
-        # if either ID or link is duplicate, skip (keep first only)
+        # If either ID or Link duplicates, drop the entire item (keep first only)
         if pid and pid in seen_ids:
             continue
         if purl and purl in seen_links:
@@ -556,24 +576,33 @@ def apply_duplicates_policy(entries: List[Dict[str, Any]], policy: str) -> List[
             seen_links.add(purl)
     return out
 
-# -------------------- Output format choice --------------------
+
+# ========================= Output builder =========================
 st.markdown("---")
 st.subheader("Generate output")
 
 output_fmt = "Google RSS"
-if st.session_state.spec_name == "Heureka strict":
-    output_fmt = st.radio("Output format", ["Google RSS", "Heureka"], index=0, horizontal=True)
+if ss.spec_name == "Heureka strict":
+    output_fmt = st.radio("Output format", ["Google RSS", "Heureka"], index=0, horizontal=True, key="out_fmt")
 
-if st.button("Build feed"):
+if st.button("Build feed", key="build_btn"):
     # enforce ID rule and duplicates policy
-    usable = [e for e in st.session_state.merged_entries if (e.get("id") or "").strip()]
-    usable = apply_duplicates_policy(usable, st.session_state.dup_policy)
+    usable = [e for e in ss.merged_entries if (e.get("id") or "").strip()]
+    usable = apply_duplicates_policy(usable, ss.dup_policy)
 
     if output_fmt == "Heureka":
-        out = build_heureka(usable)
+        data = build_heureka(usable)
+        ss.last_output = data
+        ss.last_mime = "application/xml"
+        ss.last_filename = "feed_heureka.xml"
         st.success(f"Generated {len(usable)} items (Heureka).")
-        st.download_button("⬇️ Download feed_heureka.xml", data=out, file_name="feed_heureka.xml", mime="application/xml")
     else:
-        out = build_google_rss(usable, shop_title=st.session_state.shop_title)
+        data = build_google_rss(usable, shop_title=ss.shop_title)
+        ss.last_output = data
+        ss.last_mime = "application/rss+xml"
+        ss.last_filename = "feed.xml"
         st.success(f"Generated {len(usable)} items (Google RSS).")
-        st.download_button("⬇️ Download feed.xml", data=out, file_name="feed.xml", mime="application/rss+xml")
+
+# Persisted download button (survives reruns)
+if ss.last_output:
+    st.download_button("⬇️ Download", data=ss.last_output, file_name=ss.last_filename, mime=ss.last_mime, key="dl_btn")
