@@ -243,10 +243,10 @@ if submitted:
             status_pill("Missing IDs: 0", "#16a34a")
 
     with c5:
-    if any_warnings:
-        status_pill("Warnings present ⚠️", "#f59e0b")   # amber/orange
-    else:
-        status_pill("No warnings", "#16a34a")            # green
+        if any_warnings:
+            status_pill("Warnings present ⚠️", "#f59e0b")   # amber/orange
+        else:
+            status_pill("No warnings", "#16a34a")            # green
 
 
     # ---------- SUMMARY ----------
