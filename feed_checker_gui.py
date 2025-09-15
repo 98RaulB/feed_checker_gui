@@ -144,31 +144,29 @@ if submitted:
     # 4) Collect items & run checks
     items = get_item_nodes(root, spec_name) if spec_name != "UNKNOWN" else []
     total_items = len(items)
-
+    
     ids: List[str] = []
-    links: List[str] = []
+    links: List[str] = []              # encoded product links (used for duplicates, display)
     missing_id_idx: List[int] = []
     missing_link_idx: List[int] = []
     missing_img_idx: List[int] = []
     missing_avail_idx: List[int] = []
-    bad_url_idx: List[int] = []
-    bad_img_idx: List[int] = []
-    any_warnings = (
-        len(missing_link_idx) > 0
-        or len(missing_img_idx) > 0
-        or len(missing_avail_idx) > 0
-        or len(bad_url_idx) > 0
-        or len(bad_img_idx) > 0
-    )
-
-
-
+    
+    # NEW: raw URLs for warning checks
+    raw_links: List[str] = []          # raw product links (for whitespace/non-ASCII warning)
+    raw_imgs: List[str] = []           # raw primary image URLs (for whitespace/non-ASCII warning)
+    bad_url_idx: List[int] = []        # indices with suspicious product URLs (raw)
+    bad_img_idx: List[int] = []        # indices with suspicious image URLs (raw)
+    
     # Track duplicates with first-seen index
     id_first_seen: Dict[str, int] = {}
     link_first_seen: Dict[str, int] = {}
     dup_id_pairs: List[Tuple[int, int, str]] = []
     dup_link_pairs: List[Tuple[int, int, str]] = []
-
+    
+    import re
+    ascii_only = re.compile(r'^[\x00-\x7F]+$')  # ASCII-only check for warnings
+    
     for i, it in enumerate(items):
         # encoded (safe) versions for normal checks
         pid = (read_id(it, spec_name) or "").strip()
@@ -182,6 +180,8 @@ if submitted:
     
         ids.append(pid)
         links.append(purl)
+        raw_links.append(purl_raw)
+        raw_imgs.append(pimg_raw)
     
         if not pid:
             missing_id_idx.append(i)
@@ -192,11 +192,10 @@ if submitted:
         if not pav:
             missing_avail_idx.append(i)
     
-        # --- Bad URL check ---
-        import re
-        if purl_raw and ((" " in purl_raw) or not re.match(r'^[\x00-\x7F]+$', purl_raw)):
+        # --- Bad URL warnings (spaces or non-ASCII) on RAW values only
+        if purl_raw and ((" " in purl_raw) or not ascii_only.match(purl_raw)):
             bad_url_idx.append(i)
-        if pimg_raw and ((" " in pimg_raw) or not re.match(r'^[\x00-\x7F]+$', pimg_raw)):
+        if pimg_raw and ((" " in pimg_raw) or not ascii_only.match(pimg_raw)):
             bad_img_idx.append(i)
     
         # duplicates (id)
@@ -206,47 +205,55 @@ if submitted:
             else:
                 id_first_seen[pid] = i
     
-        # duplicates (link)
+        # duplicates (link) — use ENCODED links to avoid false dupes due to encoding
         if purl:
             if purl in link_first_seen:
                 dup_link_pairs.append((link_first_seen[purl], i, purl))
             else:
                 link_first_seen[purl] = i
-
-
+    
     total_dups = len(dup_id_pairs) + len(dup_link_pairs)
-
+    
+    # >>> IMPORTANT: compute warnings AFTER lists are filled <<<
+    total_warnings = (
+        len(missing_link_idx)
+        + len(missing_img_idx)
+        + len(missing_avail_idx)
+        + len(bad_url_idx)
+        + len(bad_img_idx)
+    )
+    any_warnings = total_warnings > 0
+    
     # ---------- TOP ROW ----------
     st.markdown("---")
-    c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1], gap="large")
-
-
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1], gap="large")
+    
     with c1:
         if spec_name != "UNKNOWN":
             status_pill(f"Transformation: {spec_name}", "#16a34a")  # green
         else:
             status_pill("Transformation: UNKNOWN", "#6b7280")       # gray
-
+    
     with c2:
         status_pill(f"Items: {total_items}", "#16a34a")             # always green
-
+    
     with c3:
         if total_dups > 0:
             status_pill(f"Duplicates: {total_dups}", "#dc2626")
         else:
             status_pill("Duplicates: 0", "#16a34a")
-
+    
     with c4:
         if len(missing_id_idx) > 0:
             status_pill(f"Missing IDs: {len(missing_id_idx)}", "#dc2626")  # RED if any
         else:
             status_pill("Missing IDs: 0", "#16a34a")
-
+    
     with c5:
         if any_warnings:
-            status_pill("Warnings present ⚠️", "#f59e0b")   # amber/orange
+            status_pill(f"Warnings: {total_warnings}", "#f59e0b")   # amber/orange if any
         else:
-            status_pill("No warnings", "#16a34a")            # green
+            status_pill("Warnings: 0", "#16a34a")
 
 
     # ---------- SUMMARY ----------
