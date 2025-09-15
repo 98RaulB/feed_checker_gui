@@ -23,6 +23,35 @@ def strip_ns(tag: str) -> str:
 def read_link_raw(elem: ET.Element, spec_name: str) -> str:
     return _first(elem, SPEC.get(spec_name, {}).get("link_paths", []))
 
+def _looks_like_google_without_ns(root: ET.Element) -> bool:
+    """
+    Heuristic: <rss> root, has <item>, and inside <item> we see common
+    Google tag names (id, link, image_link, price, availability) WITHOUT the g: namespace.
+    Also ensure the Google namespace string is NOT present.
+    """
+    try:
+        root_xml = ET.tostring(root, encoding="utf-8", method="xml")
+    except Exception:
+        root_xml = b""
+
+    if b"base.google.com/ns/1.0" in root_xml:
+        return False  # it actually has g:, so not this case
+
+    root_local = strip_ns(root.tag).lower()
+    if root_local != "rss":
+        return False
+
+    first_item = root.find(".//item")
+    if first_item is None:
+        return False
+
+    # collect child local tag names of the first item
+    locals_ = {strip_ns(c.tag).lower() for c in list(first_item)}
+    googleish = {"id", "link", "image_link", "price", "availability", "product_type", "title", "description"}
+    # require at least a minimal core set
+    core = {"id", "link", "image_link"}
+    return (len(locals_ & googleish) >= 3) and (core <= locals_)
+
 def gather_primary_image_raw(elem: ET.Element, spec_name: str) -> str:
     paths = SPEC.get(spec_name, {}).get("image_primary_paths", [])
     return _first(elem, paths) if paths else ""
@@ -140,6 +169,24 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "expected_root_locals": ["feed"],
         "required_ns_fragments": ["base.google.com/ns/1.0"],
     },
+
+    "Google Merchant (no-namespace) RSS": = {
+    "item_paths": [".//item"],
+    "id_paths": ["./id"],
+    "link_paths": ["./link"],
+    "image_primary_paths": ["./image_link"],
+    "required_fields": ["title", "description", "link", "image_link"],
+    "availability_paths": ["./availability"],
+    "availability_aliases": ["availability"],
+    "signature_tags": [
+        "title","description","link","id","image_link","price","availability",
+        "brand","mpn","gtin","condition","google_product_category","product_type","shipping"
+    ],
+    "expected_root_locals": ["rss"],
+    # helps GUI show a hint
+    "required_ns_fragments": [],  # intentionally empty (no g:)
+    },
+    
     "Heureka strict": {
         "item_paths": [".//SHOPITEM"],
         "id_paths": ["./ITEM_ID"],
@@ -231,6 +278,10 @@ def detect_spec(root: ET.Element) -> str:
     if _exists(root, ".//item"):
         if b"base.google.com/ns/1.0" in root_xml:
             return "Google Merchant (g:) RSS"
+            
+    # Google RSS (no g: namespace) — must come BEFORE marketplace checks
+    if _looks_like_google_without_ns(root):
+        return "Google Merchant (no-namespace) RSS"
 
     # Heureka: SHOPITEM (case-insensitive)
     if _exists(root, ".//SHOPITEM") or _exists_local(root, "shopitem"):
