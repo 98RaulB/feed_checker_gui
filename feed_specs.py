@@ -19,6 +19,14 @@ NS = {
 def strip_ns(tag: str) -> str:
     return tag.split('}', 1)[1] if isinstance(tag, str) and '}' in tag else tag
 
+# ---- RAW versions for validation (no percent-encoding) ----
+def read_link_raw(elem: ET.Element, spec_name: str) -> str:
+    return _first(elem, SPEC.get(spec_name, {}).get("link_paths", []))
+
+def gather_primary_image_raw(elem: ET.Element, spec_name: str) -> str:
+    paths = SPEC.get(spec_name, {}).get("image_primary_paths", [])
+    return _first(elem, paths) if paths else ""
+
 def _exists_local(root: ET.Element, localname: str) -> bool:
     lname = localname.lower()
     for e in root.iter():
