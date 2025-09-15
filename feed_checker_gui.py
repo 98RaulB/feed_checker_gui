@@ -1,9 +1,10 @@
 # feed_checker_gui.py
 from __future__ import annotations
 from typing import List, Tuple, Dict
+import re
 import streamlit as st
 
-# Use the shared spec/rules from feed_specs.py (your file)
+# Shared rules/helpers from your feed_specs.py
 from feed_specs import (
     detect_spec,
     get_item_nodes,
@@ -23,10 +24,10 @@ st.set_page_config(page_title="Feed Checker (GUI)", layout="wide")
 st.title("🧪 Feed Checker (GUI)")
 st.caption("Uses the shared rules from feed_specs.py so Checker and Fixer always stay in sync.")
 
-# ---------- Small UI helpers ----------
+# ---------- Small helpers ----------
 def fetch_bytes_from_url(u: str) -> bytes:
     import requests
-    r = requests.get(u, headers={"User-Agent":"FeedChecker/GUI"}, timeout=45)
+    r = requests.get(u, headers={"User-Agent": "FeedChecker/GUI"}, timeout=45)
     r.raise_for_status()
     return r.content
 
@@ -40,8 +41,8 @@ def verdict_row(label: str, ok: bool, warn: bool = False, extra: str = "") -> Tu
 def summarize(pass_fail: Dict[str, Tuple[bool, bool, str]]):
     st.subheader("SUMMARY")
     for k, (ok, warn, extra) in pass_fail.items():
-        lbl, text = verdict_row(k, ok, warn, extra)
-        st.write(f"- **{lbl}**: {text}")
+        _, text = verdict_row(k, ok, warn, extra)
+        st.write(f"- **{k}**: {text}")
 
 def status_pill(text: str, color: str = "#16a34a"):  # green default
     # color: green #16a34a, red #dc2626, gray #6b7280
@@ -68,7 +69,6 @@ def show_sample(title: str, indices: List[int], sample_n: int = 10, red: bool = 
     with st.expander(f"Show first {min(sample_n, len(indices))}"):
         subset = indices[:sample_n]
         if red:
-            # render as a red bullet list
             st.markdown(
                 "<ul style='margin-top:0'>"
                 + "".join(f"<li style='color:#dc2626'>item index {i}</li>" for i in subset)
@@ -77,6 +77,19 @@ def show_sample(title: str, indices: List[int], sample_n: int = 10, red: bool = 
             )
         else:
             st.write(subset)
+
+def is_bad_url(url: str) -> bool:
+    """
+    Warn if a URL contains spaces or non-ASCII characters (e.g., č, ę, кириллица).
+    Note: We only warn; we don't fail the feed on this.
+    """
+    if not url:
+        return False
+    if re.search(r"\s", url):
+        return True
+    if any(ord(ch) > 127 for ch in url):
+        return True
+    return False
 
 # ---------- Form ----------
 with st.form("input"):
@@ -123,7 +136,7 @@ if submitted:
         if stop_on_first_parse_error:
             st.stop()
 
-    # 3) Detect transformation (using shared rules)
+    # 3) Detect transformation
     spec_name = detect_spec(root) if xml_ok else "UNKNOWN"
 
     # 4) Collect items & run checks
@@ -136,6 +149,8 @@ if submitted:
     missing_link_idx: List[int] = []
     missing_img_idx: List[int] = []
     missing_avail_idx: List[int] = []
+    bad_url_idx: List[int] = []
+    bad_img_idx: List[int] = []
 
     # Track duplicates with first-seen index
     id_first_seen: Dict[str, int] = {}
@@ -160,6 +175,12 @@ if submitted:
             missing_img_idx.append(i)
         if not pav:
             missing_avail_idx.append(i)
+
+        # Bad URL warnings (spaces or non-ASCII)
+        if purl and is_bad_url(purl):
+            bad_url_idx.append(i)
+        if pimg and is_bad_url(pimg):
+            bad_img_idx.append(i)
 
         # duplicates (id)
         if pid:
@@ -212,6 +233,9 @@ if submitted:
     pass_fail["Product URL present"] = (True, len(missing_link_idx) > 0, f"(missing: {len(missing_link_idx)})")
     pass_fail["Primary image present"] = (True, len(missing_img_idx) > 0, f"(missing: {len(missing_img_idx)})")
     pass_fail["Availability present"] = (True, len(missing_avail_idx) > 0, f"(missing: {len(missing_avail_idx)})")
+    # New: URL validity warnings (bad = spaces or non-ASCII)
+    pass_fail["Product URL validity"] = (True, len(bad_url_idx) > 0, f"(bad: {len(bad_url_idx)})")
+    pass_fail["Image URL validity"] = (True, len(bad_img_idx) > 0, f"(bad: {len(bad_img_idx)})")
 
     st.markdown("---")
     summarize(pass_fail)
@@ -224,6 +248,8 @@ if submitted:
     show_sample("Missing Product URL (item indices)", missing_link_idx, sample_show)
     show_sample("Missing Primary Image (item indices)", missing_img_idx, sample_show)
     show_sample("Missing Availability (item indices)", missing_avail_idx, sample_show)
+    show_sample("Bad Product URLs (item indices)", bad_url_idx, sample_show)
+    show_sample("Bad Image URLs (item indices)", bad_img_idx, sample_show)
 
     if missing_id_idx:
         with st.expander("Show first offending rows (index, link, primary image present)"):
@@ -249,6 +275,5 @@ if submitted:
         st.write("**Duplicate Product URLs:** none 🎉")
 
     st.markdown("---")
-
 st.markdown("© 2025 Raul Bertoldini")
 
