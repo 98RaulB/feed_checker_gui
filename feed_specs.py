@@ -170,7 +170,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "required_ns_fragments": ["base.google.com/ns/1.0"],
     },
 
-    "Google Merchant (no-namespace) RSS": = {
+    "Google Merchant (no-namespace) RSS": {
     "item_paths": [".//item"],
     "id_paths": ["./id"],
     "link_paths": ["./link"],
