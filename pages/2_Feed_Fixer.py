@@ -25,9 +25,18 @@ try:
 except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
+# -------------------- App config --------------------
 st.set_page_config(page_title="Feed Fixer → Google RSS", layout="wide")
 st.title("🛠️ Feed Fixer")
 st.caption("Detects known formats, merges mixed feeds, asks for mappings when needed, and outputs Google Merchant RSS.")
+
+# -------------------- Session init --------------------
+if "xml_bytes" not in st.session_state:
+    st.session_state["xml_bytes"] = None
+if "source_label" not in st.session_state:
+    st.session_state["source_label"] = None
+if "build_now" not in st.session_state:
+    st.session_state["build_now"] = False
 
 # -------------------- Small helpers --------------------
 def fetch_bytes_from_url(u: str) -> bytes:
@@ -63,10 +72,6 @@ def to_localname_set(root: ET.Element) -> Set[str]:
     return names
 
 def top2_closest_specs(root: ET.Element) -> List[Tuple[str,int,int]]:
-    """
-    Return top-2 specs by 'signature tag' overlap with the feed's local tag set.
-    score = count(signature_tags ∩ feed_tags), case-insensitive.
-    """
     present = to_localname_set(root)
     scored: List[Tuple[str,int,int]] = []
     for spec_name, cfg in SPEC.items():
@@ -83,14 +88,10 @@ def top2_closest_specs(root: ET.Element) -> List[Tuple[str,int,int]]:
 def cdata(text: str) -> str:
     if text is None:
         return ""
-    # avoid nested CDATA
     safe = text.replace("]]>", "]]]]><![CDATA[>")
     return f"<![CDATA[{safe}]]>"
 
 def as_price(val: str, default_currency: str = "EUR") -> str:
-    """
-    Normalize prices to 'N.NN CUR'. If currency missing, use default_currency.
-    """
     v = (val or "").strip()
     if not v:
         return ""
@@ -106,47 +107,43 @@ def is_urlish(s: str) -> bool:
     return isinstance(s, str) and (s.startswith("http://") or s.startswith("https://"))
 
 def collect_all_item_kv(elem: ET.Element) -> Dict[str, List[str]]:
-    """
-    Collect direct (and obvious nested) child texts and URL-like attributes.
-    Returns: localname -> [values...], lowercased keys.
-    """
     out: Dict[str, List[str]] = {}
+    def add(k: str, v: str):
+        if not v:
+            return
+        out.setdefault(k, []).append(v)
+
     for child in list(elem):
         if not isinstance(child.tag, str):
             continue
         lname = strip_ns(child.tag).lower()
 
-        # child text
         v = (child.text or "").strip()
         if v:
-            out.setdefault(lname, []).append(v)
+            add(lname, v)
 
-        # attributes that look like URLs
-        for k, a in (child.attrib or {}).items():
+        for _, a in (child.attrib or {}).items():
             if is_urlish(a):
-                out.setdefault(lname, []).append(a)
+                add(lname, a)
 
-        # go one level deeper (e.g., Ceneo <imgs><main url=.../>)
         for gchild in list(child):
             if not isinstance(gchild.tag, str):
                 continue
             glname = strip_ns(gchild.tag).lower()
             gv = (gchild.text or "").strip()
             if gv:
-                out.setdefault(glname, []).append(gv)
-            for k2, a2 in (gchild.attrib or {}).items():
+                add(glname, gv)
+            for _, a2 in (gchild.attrib or {}).items():
                 if is_urlish(a2):
-                    out.setdefault(glname, []).append(a2)
+                    add(glname, a2)
     return out
 
-# Google Merchant target fields (subset that’s most useful)
 G_FIELDS = [
     "id","item_group_id","title","description","link","image_link","additional_image_link",
     "price","availability","brand","mpn","gtin","condition",
     "google_product_category","product_type","color","material","size"
 ]
 
-# Common synonyms to help auto-map unknown keys → Google fields
 SYNONYMS: Dict[str, str] = {
     # ids
     "id":"id","item_id":"id","identifier":"id","productid":"id","product_id":"id","itemid":"id",
@@ -163,7 +160,7 @@ SYNONYMS: Dict[str, str] = {
     # images (primary)
     "image":"image_link","img":"image_link","imgurl":"image_link","image_url":"image_link","image_link":"image_link",
     "mainimage":"image_link","main":"image_link","imgurl_main":"image_link","img_main":"image_link",
-    # gallery → additional_image_link (we’ll append multiple)
+    # gallery
     "image_url_2":"additional_image_link","image2":"additional_image_link","img2":"additional_image_link",
     "image_url_3":"additional_image_link","image3":"additional_image_link","img3":"additional_image_link",
     "image_url_4":"additional_image_link","image4":"additional_image_link","img4":"additional_image_link",
@@ -192,14 +189,10 @@ SYNONYMS: Dict[str, str] = {
 }
 
 def auto_merge_to_google(item: ET.Element, spec_name: str, default_currency: str) -> Tuple[Dict[str, Any], Dict[str, List[str]]]:
-    """
-    Map to Google fields using (1) spec readers and (2) generic collection + synonyms.
-    Returns (google_fields, unmapped_source_fields)
-    """
     g: Dict[str, Any] = {k: "" for k in G_FIELDS}
-    g["additional_image_link"] = []  # list
+    g["additional_image_link"] = []
 
-    # 1) Spec readers (highest priority)
+    # Spec readers (priority)
     pid = (read_id(item, spec_name) or "").strip()
     plink = (read_link(item, spec_name) or "").strip()
     pimg  = (gather_primary_image(item, spec_name) or "").strip()
@@ -210,7 +203,7 @@ def auto_merge_to_google(item: ET.Element, spec_name: str, default_currency: str
     if pimg: g["image_link"] = percent_encode_url(pimg)
     if pav: g["availability"] = pav
 
-    # 2) Generic collection + synonyms
+    # Generic
     bag = collect_all_item_kv(item)
     unmapped: Dict[str, List[str]] = {}
 
@@ -220,7 +213,7 @@ def auto_merge_to_google(item: ET.Element, spec_name: str, default_currency: str
         if k == "additional_image_link":
             if val not in g["additional_image_link"]:
                 g["additional_image_link"].append(percent_encode_url(val))
-        elif k in ("link", "image_link"):
+        elif k in ("link","image_link"):
             g[k] = percent_encode_url(val)
         else:
             if not g.get(k):
@@ -230,36 +223,27 @@ def auto_merge_to_google(item: ET.Element, spec_name: str, default_currency: str
         tgt = SYNONYMS.get(src_tag)
         if tgt:
             for v in values:
-                # Gallery keys naturally append
                 if tgt == "price":
                     push(tgt, as_price(v, default_currency))
                 else:
                     push(tgt, v)
         else:
-            # Heuristic: anything with "image" goes to gallery
             if "image" in src_tag or "img" in src_tag:
                 for v in values:
                     if is_urlish(v):
                         push("additional_image_link", v)
                 continue
-            # otherwise keep for UI mapping
             unmapped[src_tag] = values
 
-    # Ensure price normalized if present
     if g.get("price"):
         g["price"] = as_price(str(g["price"]), default_currency)
 
-    # Cleanup whitespace
     for k in ["title","description","brand","mpn","gtin","condition","google_product_category","product_type","color","material","size"]:
         g[k] = (g.get(k) or "").strip()
 
     return g, unmapped
 
 def build_google_rss(entries: List[Dict[str, Any]], shop_title: str = "FeedFixer Output") -> bytes:
-    """
-    Build Google Merchant RSS (rss 2.0 with g: namespace).
-    Only includes supported g: fields + core RSS title/description/link.
-    """
     def esc(s: str) -> str:
         return html.escape(s or "")
 
@@ -274,18 +258,15 @@ def build_google_rss(entries: List[Dict[str, Any]], shop_title: str = "FeedFixer
     for e in entries:
         pid = (e.get("id") or "").strip()
         if not pid:
-            continue  # IDs mandatory
+            continue
         lines.append("    <item>")
-        # g:id first
         lines.append(f"      <g:id>{esc(pid)}</g:id>")
 
-        # RSS title/description
         if e.get("title"):
             lines.append(f"      <title>{cdata(e['title'])}</title>")
         if e.get("description"):
             lines.append(f"      <description>{cdata(e['description'])}</description>")
 
-        # link & images
         if e.get("link"):
             lines.append(f"      <link>{esc(e['link'])}</link>")
         if e.get("image_link"):
@@ -293,13 +274,11 @@ def build_google_rss(entries: List[Dict[str, Any]], shop_title: str = "FeedFixer
         for ai in e.get("additional_image_link", []) or []:
             lines.append(f"      <g:additional_image_link>{esc(ai)}</g:additional_image_link>")
 
-        # price & availability
         if e.get("price"):
             lines.append(f"      <g:price>{esc(e['price'])}</g:price>")
         if e.get("availability"):
             lines.append(f"      <g:availability>{esc(e['availability'])}</g:availability>")
 
-        # attributes
         for k in ["item_group_id","brand","mpn","gtin","condition",
                   "google_product_category","product_type","color","material","size"]:
             v = (e.get(k) or "").strip()
@@ -312,46 +291,57 @@ def build_google_rss(entries: List[Dict[str, Any]], shop_title: str = "FeedFixer
     lines.append("</rss>")
     return "\n".join(lines).encode("utf-8")
 
-# -------------------- Sidebar options --------------------
+# -------------------- Sidebar options (widgets persist automatically) --------------------
 with st.sidebar:
     st.header("Output options")
-    shop_title = st.text_input("Feed title", value="FeedFixer Output")
-    default_currency = st.text_input("Default currency (for price parsing)", value="EUR")
-    st.caption("IDs are mandatory: items without ID will be dropped from the output.")
+    shop_title = st.text_input("Feed title", value="FeedFixer Output", key="shop_title")
+    default_currency = st.text_input("Default currency", value="EUR", key="default_currency")
+    if st.button("🔄 Reset / Load another feed"):
+        for k in list(st.session_state.keys()):
+            if k.startswith("map_"):
+                del st.session_state[k]
+        st.session_state["xml_bytes"] = None
+        st.session_state["source_label"] = None
+        st.session_state["build_now"] = False
+        st.rerun()
 
-# -------------------- Input form --------------------
-with st.form("input"):
-    url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
-    up = st.file_uploader("…or upload an XML file", type=["xml"])
-    sample_show = st.number_input("Show up to N sample issues per category", 1, 50, 10)
-    submitted = st.form_submit_button("Load")
+# -------------------- Load form (one-time) --------------------
+if st.session_state["xml_bytes"] is None:
+    with st.form("input"):
+        url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
+        up = st.file_uploader("…or upload an XML file", type=["xml"])
+        submitted = st.form_submit_button("Load")
+    if submitted:
+        try:
+            if url.strip():
+                if not url.lower().startswith(("http://","https://")):
+                    st.error("URL must start with http:// or https://")
+                    st.stop()
+                xml_bytes = fetch_bytes_from_url(url.strip())
+                st.session_state["xml_bytes"] = xml_bytes
+                st.session_state["source_label"] = url.strip()
+            elif up is not None:
+                st.session_state["xml_bytes"] = up.read()
+                st.session_state["source_label"] = up.name
+            else:
+                st.warning("Provide a URL or upload a file.")
+                st.stop()
+            st.success("Feed loaded. You can now map fields and build the RSS.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to load feed: {e}")
+            st.stop()
 
-if not submitted:
+# If still no feed, stop here
+if st.session_state["xml_bytes"] is None:
     st.stop()
 
-# -------------------- Load bytes --------------------
-xml_bytes = None
-src_label = None
-if url.strip():
-    if not url.lower().startswith(("http://","https://")):
-        st.error("URL must start with http:// or https://")
-        st.stop()
-    try:
-        xml_bytes = fetch_bytes_from_url(url.strip())
-        src_label = url.strip()
-    except Exception as e:
-        st.error(f"Failed to download URL: {e}")
-        st.stop()
-elif up is not None:
-    xml_bytes = up.read()
-    src_label = up.name
-else:
-    st.warning("Provide a URL or upload a file.")
-    st.stop()
+# -------------------- Parse & detect (from session_state) --------------------
+xml_bytes = st.session_state["xml_bytes"]
+src_label = st.session_state["source_label"]
 
 st.write(f"**Source:** `{src_label}`")
 
-# -------------------- Parse --------------------
 try:
     root = ET.fromstring(xml_bytes)
     st.success("XML syntax: OK")
@@ -359,7 +349,6 @@ except ET.ParseError as e:
     st.error(f"XML syntax: ERROR — {e}")
     st.stop()
 
-# -------------------- Detect & score --------------------
 spec_name = detect_spec(root)
 top2 = top2_closest_specs(root)
 
@@ -378,7 +367,6 @@ with c2:
 
 # -------------------- Extract items, auto-merge, collect unmapped --------------------
 items = get_item_nodes(root, spec_name) if spec_name != "UNKNOWN" else []
-
 st.write(f"Items found: **{len(items)}**")
 
 merged: List[Dict[str, Any]] = []
@@ -386,7 +374,7 @@ all_unmapped: Dict[str, Set[str]] = {}
 missing_ids = 0
 
 for it in items:
-    g, unmapped = auto_merge_to_google(it, spec_name, default_currency)
+    g, unmapped = auto_merge_to_google(it, spec_name, st.session_state.get("default_currency","EUR"))
     if not (g.get("id") or "").strip():
         missing_ids += 1
     for k, vals in unmapped.items():
@@ -400,7 +388,7 @@ for it in items:
 if missing_ids > 0:
     st.error(f"{missing_ids} item(s) missing ID. They will be dropped unless you map a tag to g:id below.")
 
-# -------------------- Mapping UI for unknown tags --------------------
+# -------------------- Mapping UI (stateful) --------------------
 st.markdown("---")
 st.subheader("Map unknown tags to Google fields (optional, keeps data)")
 
@@ -417,9 +405,13 @@ else:
     for tag, examples in sorted(all_unmapped.items()):
         with cols[i % 3]:
             example = next(iter(examples))
+            # pull previous selection from session_state (if any)
+            prev = st.session_state.get(f"map_{tag}", "(ignore)")
             choice = st.selectbox(
                 f"{tag}  \n`e.g. {example[:80]}{'…' if len(example)>80 else ''}`",
-                TARGETS, index=0, key=f"map_{tag}"
+                TARGETS,
+                index=(TARGETS.index(prev) if prev in TARGETS else 0),
+                key=f"map_{tag}",
             )
             selection[tag] = choice
         i += 1
@@ -445,14 +437,14 @@ if tag_map:
             elif tgt == "price":
                 last = next((v for v in reversed(vals) if v.strip()), "")
                 if last:
-                    g["price"] = as_price(last, default_currency)
+                    g["price"] = as_price(last, st.session_state.get("default_currency","EUR"))
             else:
                 if not g.get(tgt):
                     g[tgt] = vals[0]
         updated.append(g)
     merged = updated
 
-# -------------------- Generate → Google RSS --------------------
+# -------------------- Generate Google RSS (stateful build) --------------------
 st.markdown("---")
 st.subheader("Generate Google Merchant RSS")
 
@@ -461,8 +453,16 @@ dropped = len(merged) - len(usable)
 if dropped > 0:
     st.warning(f"Dropping {dropped} item(s) without ID from the output (IDs are mandatory).")
 
-if st.button("Build RSS"):
-    out = build_google_rss(usable, shop_title=shop_title)
+col_build, _ = st.columns([1,4])
+with col_build:
+    if st.button("Build RSS"):
+        st.session_state["build_now"] = True
+        st.rerun()
+
+# If the user clicked Build RSS, produce output now (on this rerun)
+if st.session_state["build_now"]:
+    out = build_google_rss(usable, shop_title=st.session_state.get("shop_title","FeedFixer Output"))
     st.success(f"Generated {len(usable)} items.")
     st.download_button("⬇️ Download feed.xml", data=out, file_name="feed.xml", mime="application/rss+xml")
+
 
