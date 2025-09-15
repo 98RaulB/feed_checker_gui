@@ -159,8 +159,8 @@ SPEC: Dict[str, Dict[str, Any]] = {
     "Compari / Árukereső / Pazaruvaj (case-insensitive)": {
         "item_paths": [".//product"],
         "id_paths": ["./Identifier", "./identifier", "./ProductId", "./productid", "./id"],
-        "link_paths": ["./Product_url", "./product_url", "./URL", "./url", "./link"],
-        "image_primary_paths": ["./Image_url", "./image_url", "./image", "./imgurl"],
+        "link_paths": ["./Product_url", "./product_url"],
+        "image_primary_paths": ["./Image_url", "./image_url"],
         "required_fields": ["identifier|productid", "name", "product_url", "price", "image_url", "category", "description"],
         "availability_paths": ["./availability", "./in_stock", "./stock", "./availability_status", "./Delivery_time"],
         "availability_aliases": ["availability", "in_stock", "stock", "availability_status", "Delivery_time"],
