@@ -12,6 +12,8 @@ from feed_specs import (
     read_link,
     read_availability,
     gather_primary_image,
+    read_link_raw,                 # NEW
+    gather_primary_image_raw,      # NEW
 )
 
 # Safe XML parsing (defusedxml if present)
@@ -159,14 +161,19 @@ if submitted:
     dup_link_pairs: List[Tuple[int, int, str]] = []
 
     for i, it in enumerate(items):
+        # encoded (safe) versions for normal checks
         pid = (read_id(it, spec_name) or "").strip()
         purl = (read_link(it, spec_name) or "").strip()
         pav  = (read_availability(it, spec_name) or "").strip()
         pimg = (gather_primary_image(it, spec_name) or "").strip()
-
+    
+        # RAW versions only for “bad URL” detection
+        purl_raw = (read_link_raw(it, spec_name) or "").strip()
+        pimg_raw = (gather_primary_image_raw(it, spec_name) or "").strip()
+    
         ids.append(pid)
         links.append(purl)
-
+    
         if not pid:
             missing_id_idx.append(i)
         if not purl:
@@ -175,26 +182,28 @@ if submitted:
             missing_img_idx.append(i)
         if not pav:
             missing_avail_idx.append(i)
-
-        # Bad URL warnings (spaces or non-ASCII)
-        if purl and is_bad_url(purl):
+    
+        # --- Bad URL check ---
+        import re
+        if purl_raw and ((" " in purl_raw) or not re.match(r'^[\x00-\x7F]+$', purl_raw)):
             bad_url_idx.append(i)
-        if pimg and is_bad_url(pimg):
+        if pimg_raw and ((" " in pimg_raw) or not re.match(r'^[\x00-\x7F]+$', pimg_raw)):
             bad_img_idx.append(i)
-
+    
         # duplicates (id)
         if pid:
             if pid in id_first_seen:
                 dup_id_pairs.append((id_first_seen[pid], i, pid))
             else:
                 id_first_seen[pid] = i
-
+    
         # duplicates (link)
         if purl:
             if purl in link_first_seen:
                 dup_link_pairs.append((link_first_seen[purl], i, purl))
             else:
                 link_first_seen[purl] = i
+
 
     total_dups = len(dup_id_pairs) + len(dup_link_pairs)
 
