@@ -235,8 +235,15 @@ def auto_merge_to_google(item: ET.Element, spec_name: str, default_currency: str
             enc = percent_encode_url(val)
             if enc not in g["additional_image_link"]:
                 g["additional_image_link"].append(enc)
-        elif k in ("link", "image_link"):
-            g[k] = percent_encode_url(val)
+        elif k == "link":
+            g["link"] = percent_encode_url(val)
+        elif k == "image_link":
+            enc = percent_encode_url(val)
+            if not g.get("image_link"):
+                g["image_link"] = enc
+            else:
+                if enc != g["image_link"] and enc not in g["additional_image_link"]:
+                    g["additional_image_link"].append(enc)
         else:
             if not g.get(k):
                 g[k] = val
