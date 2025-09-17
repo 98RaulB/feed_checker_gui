@@ -511,10 +511,27 @@ if ss.tag_map:
                         enc = percent_encode_url(v)
                         if enc not in g["additional_image_link"]:
                             g["additional_image_link"].append(enc)
-            elif tgt in ("link","image_link"):
+            elif tgt == "link":
                 last = next((v for v in reversed(vals) if v.strip()), "")
                 if last:
-                    g[tgt] = percent_encode_url(last)
+                    g["link"] = percent_encode_url(last)
+            elif tgt == "image_link":
+                # preserve order: first becomes main; the rest become additional
+                first = None
+                for v in vals:
+                    if not v.strip():
+                        continue
+                    enc = percent_encode_url(v)
+                    if not first:
+                        first = enc
+                        # only set if not already set by spec reader
+                        if not g.get("image_link"):
+                            g["image_link"] = first
+                        elif enc != g["image_link"] and enc not in g["additional_image_link"]:
+                            g["additional_image_link"].append(enc)
+                    else:
+                        if enc != g.get("image_link") and enc not in g["additional_image_link"]:
+                            g["additional_image_link"].append(enc)
             elif tgt == "price":
                 last = next((v for v in reversed(vals) if v.strip()), "")
                 if last:
