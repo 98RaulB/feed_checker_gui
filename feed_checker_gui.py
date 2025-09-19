@@ -83,6 +83,40 @@ def show_issue_table(title: str, rows: List[Dict], sample_n: int):
     with st.expander(f"Show first {min(sample_n, len(rows))}"):
         st.dataframe(rows[:sample_n], use_container_width=True)
 
+# ---------- Tag matching helpers (prevents 'Items: 0' when tag name differs) ----------
+def localname(tag: str) -> str:
+    return tag.split('}', 1)[1] if '}' in tag else tag
+
+# Very forgiving defaults
+DEFAULT_ITEM_TAGS = {
+    # lower/upper/common
+    "item","ITEM","product","PRODUCT","offer","OFFER","entry","ENTRY",
+    # marketplace/feed aliases
+    "shopitem","SHOPITEM","offeritem","OFFERITEM","productitem","PRODUCTITEM",
+    "shopItem","ShopItem","Product","Offer","Entry",
+}
+
+# Spec-to-tag mapping (tune as needed)
+ITEM_TAGS_BY_SPEC = {
+    # Heureka/Ceneo-like
+    "HEUREKA": {"SHOPITEM","shopitem","ShopItem"},
+    "CENEO": {"offer","Offer","OFFER","SHOPITEM","shopitem"},
+    # Google/Atom/RSS
+    "GOOGLE": {"item","entry"},
+    "ATOM": {"entry","ENTRY"},
+    "RSS": {"item","ITEM"},
+    # Skroutz/Compari/Ceneje examples (adjust as encountered)
+    "SKROUTZ": {"item","offer","product"},
+    "COMPARI": {"product","offer","item"},
+    "CENEJE": {"item","offer","product"},
+    # Fallback
+    "UNKNOWN": set(),
+}
+
+def guess_item_tag_set(spec_name: str) -> set[str]:
+    base = set(ITEM_TAGS_BY_SPEC.get((spec_name or "UNKNOWN").upper(), set()))
+    return (base | set(DEFAULT_ITEM_TAGS))
+
 # ---------- I/O helpers ----------
 def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> str:
     """Stream a URL to a temp file (no giant bytes in memory). Returns file path."""
@@ -127,33 +161,52 @@ def open_maybe_gzip(path: str):
     return gzip.open(path, "rb") if is_gzip_path(path) else open(path, "rb")
 
 # ---------- Streaming parser ----------
-def iter_items_stream(file_like, guess_item_tags: Iterable[str]=("item","product","offer","entry")):
+def iter_items_stream(file_like, guess_item_tags: Iterable[str]):
     """
     Stream items with ET.iterparse. Yields (elem, root) for each end-event of an item-like tag.
     Caller should elem.clear() after processing to free memory.
     """
+    want = set(guess_item_tags)
     context = ET.iterparse(file_like, events=("start","end"))
     event, root = next(context)  # root element
-    def is_item_tag(tag: str) -> bool:
-        bare = tag.split('}',1)[1] if '}' in tag else tag
-        return bare in guess_item_tags
+
+    # small debug sampler
+    seen_counts: Dict[str, int] = {}
+    yielded = 0
+
     for event, elem in context:
-        if event == "end" and is_item_tag(elem.tag):
-            yield elem, root
-            elem.clear()
+        if event == "end":
+            ln = localname(elem.tag)
+            if yielded < 1_000:  # sample early for speed
+                seen_counts[ln] = seen_counts.get(ln, 0) + 1
+            if ln in want:
+                yielded += 1
+                yield elem, root
+                elem.clear()
+
+    # If nothing matched, emit a hint in the UI
+    if yielded == 0 and seen_counts:
+        top = sorted(seen_counts.items(), key=lambda x: -x[1])[:10]
+        st.info("No items matched. Top end-tags seen: " + ", ".join(f"{k}×{v}" for k,v in top))
 
 # ---------- Form ----------
 with st.form("input"):
     url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
     up = st.file_uploader("…or upload an XML file (.xml or .xml.gz)", type=["xml", "gz"])
-    colA, colB, colC = st.columns(3)
+
+    colA, colB = st.columns(2)
     with colA:
-        sample_show = st.number_input("Show up to N sample issues per category", 1, 50, 10)
-    with colB:
         scope = st.selectbox("Processing scope", ["Auto (full)", "Sample first N items"])
-    with colC:
+    with colB:
+        stop_on_first_parse_error = st.checkbox("Stop on XML parse error", value=True)
+
+    # Show the N picker ONLY when Sample mode is chosen
+    n_limit = None
+    if scope == "Sample first N items":
         n_limit = st.number_input("N (for sample mode)", min_value=100, max_value=200_000, value=5_000, step=500)
-    stop_on_first_parse_error = st.checkbox("Stop on XML parse error", value=True)
+
+    sample_show = st.number_input("Show up to N sample issues per category", 1, 50, 10)
+
     submitted = st.form_submit_button("Check feed")
 
 if not submitted:
@@ -257,7 +310,6 @@ def run_dom_path() -> bool:
         spec = detect_spec(root) or "UNKNOWN"
         items = get_item_nodes(root, spec) if spec != "UNKNOWN" else []
         total = len(items)
-        # Extract all (Auto/full only); sample mode never uses DOM
         for i, it in enumerate(items):
             process_item(it, i, spec)
         spec_name = spec
@@ -287,10 +339,15 @@ def run_stream_path(limit: int | None):
             spec_name_local = detect_spec(root_first) or "UNKNOWN"
             spec_name = spec_name_local
             st.success("XML syntax: OK")
+
+        # Figure out which item tags to look for, and show a small hint
+        item_tags = guess_item_tag_set(spec_name)
+        st.caption("Looking for item tags: " + ", ".join(sorted(list(item_tags))[:8]) + ("…" if len(item_tags)>8 else ""))
+
         # Full streaming pass
         processed = 0
         with open_maybe_gzip(src_path) as fh2:
-            for elem, root in iter_items_stream(fh2):
+            for elem, root in iter_items_stream(fh2, guess_item_tags=item_tags):
                 total_items += 1
                 if limit is not None and processed >= limit:
                     # keep counting total_items beyond limit without processing
@@ -311,7 +368,7 @@ def run_stream_path(limit: int | None):
 used_streaming = False
 if use_sample_mode:
     used_streaming = True
-    run_stream_path(limit=int(n_limit))
+    run_stream_path(limit=int(n_limit))  # n_limit is guaranteed not None in this branch
 else:
     if auto_force_streaming:
         used_streaming = True
@@ -457,7 +514,7 @@ show_issue_table("Duplicate Product URLs (grouped, with IDs)", dup_url_rows, sam
 st.markdown("---")
 st.caption(
     ("Scope: Sample first N items (streaming)" if use_sample_mode else
-     f"Scope: Auto (parser: {'Streaming' if (used_streaming:= (is_gzip_path(src_path) or file_size>SMALL_SIZE_LIMIT)) else 'DOM'})")
+     f"Scope: Auto (parser: {'Streaming' if (is_gzip_path(src_path) or file_size>SMALL_SIZE_LIMIT) else 'DOM'})")
 )
 st.markdown("© 2025 Raul Bertoldini")
 
