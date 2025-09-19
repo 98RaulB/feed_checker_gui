@@ -7,12 +7,12 @@ import os
 import io
 import gzip
 import tempfile
-
 import streamlit as st
 
 # Shared rules/helpers from your feed_specs.py
 from feed_specs import (
     detect_spec,
+    get_item_nodes,               # used in DOM path
     read_id,
     read_link,
     read_availability,
@@ -29,9 +29,14 @@ except Exception:
 
 st.set_page_config(page_title="Feed Checker (GUI)", layout="wide")
 st.title("🧪 Feed Checker (GUI)")
-st.caption("Streaming-safe version. Uses iterparse for huge feeds; small feeds still OK.")
+st.caption("Auto mode for small vs large feeds; optional Sample mode to process only the first N items (streaming & low RAM).")
 
-# ---------- Small helpers ----------
+# --------- Tuning ----------
+SMALL_SIZE_LIMIT = 30 * 1024 * 1024   # 30 MB → DOM; above this → streaming
+REQUEST_TIMEOUT = 120                 # seconds
+STREAM_CHUNK = 1 << 20                # 1 MB
+
+# ---------- UI helpers ----------
 def verdict_row(label: str, ok: bool, warn: bool = False, extra: str = "") -> Tuple[str, str]:
     if ok and not warn:
         return (label, f"✅ PASS {extra}".strip())
@@ -46,7 +51,6 @@ def summarize(pass_fail: Dict[str, Tuple[bool, bool, str]]):
         st.write(f"- **{k}**: {text}")
 
 def status_pill(text: str, color: str = "#16a34a"):  # green default
-    # color: green #16a34a, red #dc2626, gray #6b7280, amber #f59e0b
     st.markdown(
         f"""
         <div style="
@@ -79,73 +83,64 @@ def show_issue_table(title: str, rows: List[Dict], sample_n: int):
     with st.expander(f"Show first {min(sample_n, len(rows))}"):
         st.dataframe(rows[:sample_n], use_container_width=True)
 
-def download_to_tmp(url: str, chunk=1<<20) -> str:
+# ---------- I/O helpers ----------
+def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> str:
     """Stream a URL to a temp file (no giant bytes in memory). Returns file path."""
     import requests
-    with requests.get(url, stream=True, timeout=120, headers={"User-Agent":"FeedChecker/GUI"}) as r:
+    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers={"User-Agent":"FeedChecker/GUI"}) as r:
         r.raise_for_status()
-        size = int(r.headers.get("Content-Length") or 0)
-        if size and size > 200*1024*1024:
-            st.warning(f"Large feed detected: ~{size/1024/1024:.0f} MB. Switching to streaming parser.")
-        suffix = ".xml.gz" if r.headers.get("Content-Type","").lower().endswith("gzip") or url.lower().endswith(".gz") else ".xml"
+        ctype = r.headers.get("Content-Type","").lower()
+        size_hdr = int(r.headers.get("Content-Length") or 0)
+
+        suffix = ".xml.gz" if ("gzip" in ctype or url.lower().endswith(".gz")) else ".xml"
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        written = 0
         for chunk_bytes in r.iter_content(chunk_size=chunk):
             if chunk_bytes:
                 tmp.write(chunk_bytes)
-        tmp.flush()
-        tmp.close()
+                written += len(chunk_bytes)
+        tmp.flush(); tmp.close()
+
+        effective_size = written or size_hdr
+        if effective_size and effective_size > SMALL_SIZE_LIMIT:
+            st.warning(f"Large feed detected: ~{effective_size/1024/1024:.0f} MB. Using streaming parser.")
         return tmp.name
 
-def filelike_from_upload(up) -> io.BufferedReader:
-    """Persist an uploaded file to disk to allow iterparse to stream it."""
-    # Try to infer .gz by magic header
-    head = up.read(2)
-    up.seek(0)
+def persist_upload(up) -> str:
+    """Save an uploaded file to disk and return the path."""
+    head = up.read(2); up.seek(0)
     is_gz = head == b"\x1f\x8b"
     suffix = ".xml.gz" if is_gz or (up.name and up.name.lower().endswith(".gz")) else ".xml"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(up.read())
-    tmp.flush(); tmp.close()
+    tmp.write(up.read()); tmp.flush(); tmp.close()
     up.seek(0)
-    return open(tmp.name, "rb")
+    return tmp.name
 
-def open_maybe_gzip(path_or_fileobj):
-    """Return a binary file-like object that yields decompressed bytes if .gz."""
-    if isinstance(path_or_fileobj, (io.BytesIO, io.BufferedReader)):
-        # Peek gzip magic
-        pos = path_or_fileobj.tell()
-        magic = path_or_fileobj.read(2)
-        path_or_fileobj.seek(pos)
-        if magic == b"\x1f\x8b":
-            return gzip.open(path_or_fileobj, "rb")
-        return path_or_fileobj
-    # else it's a path
-    if str(path_or_fileobj).lower().endswith(".gz"):
-        return gzip.open(path_or_fileobj, "rb")
-    return open(path_or_fileobj, "rb")
+def is_gzip_path(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(2) == b"\x1f\x8b" or path.lower().endswith(".gz")
+    except Exception:
+        return path.lower().endswith(".gz")
 
+def open_maybe_gzip(path: str):
+    return gzip.open(path, "rb") if is_gzip_path(path) else open(path, "rb")
+
+# ---------- Streaming parser ----------
 def iter_items_stream(file_like, guess_item_tags: Iterable[str]=("item","product","offer","entry")):
     """
     Stream items with ET.iterparse. Yields (elem, root) for each end-event of an item-like tag.
-    Caller MUST use/read and then call elem.clear(), and occasionally root.clear().
+    Caller should elem.clear() after processing to free memory.
     """
     context = ET.iterparse(file_like, events=("start","end"))
-    event, root = next(context)  # grab root for spec detection and clearing
-    # Detect item tags by suffix match (namespace-safe)
+    event, root = next(context)  # root element
     def is_item_tag(tag: str) -> bool:
-        if not tag:
-            return False
         bare = tag.split('}',1)[1] if '}' in tag else tag
         return bare in guess_item_tags
     for event, elem in context:
         if event == "end" and is_item_tag(elem.tag):
             yield elem, root
-            # free processed subtree
             elem.clear()
-            # light-touch root clear to drop siblings already processed
-            if len(root) > 0 and root[0] is not None:
-                # stdlib ElementTree doesn't have getprevious(); safe to clear root periodically
-                pass
 
 # ---------- Form ----------
 with st.form("input"):
@@ -155,62 +150,50 @@ with st.form("input"):
     with colA:
         sample_show = st.number_input("Show up to N sample issues per category", 1, 50, 10)
     with colB:
-        mode = st.selectbox("Parse mode", ["Lite (sample items)", "Full (process all items)"])
+        scope = st.selectbox("Processing scope", ["Auto (full)", "Sample first N items"])
     with colC:
-        stop_on_first_parse_error = st.checkbox("Stop on XML parse error", value=True)
+        n_limit = st.number_input("N (for sample mode)", min_value=100, max_value=200_000, value=5_000, step=500)
+    stop_on_first_parse_error = st.checkbox("Stop on XML parse error", value=True)
     submitted = st.form_submit_button("Check feed")
 
 if not submitted:
     st.markdown("© 2025 Raul Bertoldini")
     st.stop()
 
-# 1) Obtain a file-like source (path or handle), streaming-friendly
-src_label = None
-path_or_handle: Any = None
+# 1) Get a file on disk
 if url.strip():
     if not url.lower().startswith(("http://", "https://")):
-        st.error("URL must start with http:// or https://")
-        st.stop()
+        st.error("URL must start with http:// or https://"); st.stop()
     try:
-        path_or_handle = download_to_tmp(url.strip())
+        src_path = download_to_tmp(url.strip())
         src_label = url.strip()
     except Exception as e:
-        st.error(f"Failed to download URL: {e}")
-        st.stop()
+        st.error(f"Failed to download URL: {e}"); st.stop()
 elif up is not None:
     try:
-        fh = filelike_from_upload(up)
-        path_or_handle = fh  # handle
+        src_path = persist_upload(up)
         src_label = up.name
     except Exception as e:
-        st.error(f"Failed to read uploaded file: {e}")
-        st.stop()
+        st.error(f"Failed to read uploaded file: {e}"); st.stop()
 else:
-    st.warning("Provide a URL or upload a file.")
-    st.stop()
+    st.warning("Provide a URL or upload a file."); st.stop()
 
 st.write(f"**Source:** `{src_label}`")
 
-# 2) Open (with transparent gzip if needed) and bootstrap XML
-try:
-    f = open_maybe_gzip(path_or_handle)
-except Exception as e:
-    st.error(f"Failed opening source: {e}")
-    st.stop()
+# Decide parsing strategy for Auto vs Sample
+file_size = os.path.getsize(src_path) if os.path.exists(src_path) else 0
+auto_force_streaming = is_gzip_path(src_path) or (file_size > SMALL_SIZE_LIMIT)
+use_sample_mode = (scope == "Sample first N items")
 
-# We will:
-#  - do a tiny, safe read to assert the XML is parseable;
-#  - then stream with iterparse and compute metrics on the fly.
-
-# ---- Bootstrap root + spec via a small iterparse priming ----
+# Data buckets (shared)
 xml_ok = True
 spec_name = "UNKNOWN"
-total_items = 0
+total_items = 0                 # total encountered (streamed) or len(items) in DOM
+processed_items = 0             # for sample mode display
 
-# Collections (same names as your previous code)
 ids: List[str] = []
-links: List[str] = []              # encoded product links
-images: List[str] = []             # encoded primary image
+links: List[str] = []
+images: List[str] = []
 avails: List[str] = []
 
 missing_id_idx: List[int] = []
@@ -230,17 +213,11 @@ dup_link_pairs: List[Tuple[int, int, str]] = []
 
 ascii_only = re.compile(r'^[\x00-\x7F]+$')
 
-# How many items to process in Lite mode (guardrail)
-LITE_LIMIT = 30000
-
 def process_item(elem, index: int, spec: str):
-    """Extract and update all lists/counters for a single item element."""
-    # Safe/encoded for core checks
     pid = (read_id(elem, spec) or "").strip()
     purl = (read_link(elem, spec) or "").strip()
     pav  = (read_availability(elem, spec) or "").strip()
     pimg = (gather_primary_image(elem, spec) or "").strip()
-    # RAW values only for 'bad URL' warnings
     purl_raw = (read_link_raw(elem, spec) or "").strip()
     pimg_raw = (gather_primary_image_raw(elem, spec) or "").strip()
 
@@ -269,61 +246,95 @@ def process_item(elem, index: int, spec: str):
         else:
             link_first_seen[purl] = index
 
-try:
-    # We need spec_name for read_* helpers. We'll peek root from a fresh iterparse
-    # Note: create a new handle because iterparse consumes the stream.
-    def open_again():
-        if isinstance(path_or_handle, (str, os.PathLike)):
-            return open_maybe_gzip(path_or_handle)
-        # uploaded handle
-        try:
-            path_or_handle.seek(0)
-        except Exception:
-            pass
-        return open_maybe_gzip(path_or_handle)
-
-    # Pass 1: detect spec_name quickly
-    with open_again() as fh1:
-        context1 = ET.iterparse(fh1, events=("start",))
-        _, root_first = next(context1)  # first start is root
-        spec_name = detect_spec(root_first) or "UNKNOWN"
-        # If we got here, XML is at least syntactically OK up to root
+# ---------- DOM path (Auto + small, non-gz, and only if NOT sample mode) ----------
+def run_dom_path() -> bool:
+    global xml_ok, spec_name, total_items, processed_items
+    try:
+        with open(src_path, "rb") as fh:
+            xml_bytes = fh.read()
+        root = ET.fromstring(xml_bytes)
         st.success("XML syntax: OK")
+        spec = detect_spec(root) or "UNKNOWN"
+        items = get_item_nodes(root, spec) if spec != "UNKNOWN" else []
+        total = len(items)
+        # Extract all (Auto/full only); sample mode never uses DOM
+        for i, it in enumerate(items):
+            process_item(it, i, spec)
+        spec_name = spec
+        total_items = total
+        processed_items = total
+        return True
+    except ET.ParseError as e:
+        st.error(f"XML syntax: ERROR — {e}")
+        if stop_on_first_parse_error:
+            st.stop()
+        return False
+    except MemoryError:
+        st.warning("Memory pressure detected with DOM path; falling back to streaming.")
+        return False
+    except Exception as e:
+        st.warning(f"DOM path failed ({e}). Falling back to streaming.")
+        return False
 
-    # Pass 2: real streaming pass to process items
-    processed = 0
-    limit = None if mode == "Full (process all items)" else LITE_LIMIT
-    with open_again() as fh2:
-        for elem, root in iter_items_stream(fh2):
-            total_items += 1
-            # Skip processing after limit in Lite mode, but keep counting items for display
-            if limit is not None and processed >= limit:
-                continue
-            process_item(elem, processed, spec_name)
-            processed += 1
-
-except ET.ParseError as e:
-    xml_ok = False
-    st.error(f"XML syntax: ERROR — {e}")
-    if stop_on_first_parse_error:
+# ---------- Streaming path (Auto-large, any .gz, or Sample mode) ----------
+def run_stream_path(limit: int | None):
+    global xml_ok, spec_name, total_items, processed_items
+    try:
+        # Quick root/spec detection
+        with open_maybe_gzip(src_path) as fh1:
+            context1 = ET.iterparse(fh1, events=("start",))
+            _, root_first = next(context1)
+            spec_name_local = detect_spec(root_first) or "UNKNOWN"
+            spec_name = spec_name_local
+            st.success("XML syntax: OK")
+        # Full streaming pass
+        processed = 0
+        with open_maybe_gzip(src_path) as fh2:
+            for elem, root in iter_items_stream(fh2):
+                total_items += 1
+                if limit is not None and processed >= limit:
+                    # keep counting total_items beyond limit without processing
+                    continue
+                process_item(elem, processed, spec_name)
+                processed += 1
+        processed_items = processed
+    except ET.ParseError as e:
+        xml_ok = False
+        st.error(f"XML syntax: ERROR — {e}")
+        if stop_on_first_parse_error:
+            st.stop()
+    except Exception as e:
+        st.error(f"Streaming parser error: {e}")
         st.stop()
+
+# Decide and run
+used_streaming = False
+if use_sample_mode:
+    used_streaming = True
+    run_stream_path(limit=int(n_limit))
+else:
+    if auto_force_streaming:
+        used_streaming = True
+        run_stream_path(limit=None)
+    else:
+        ok = run_dom_path()
+        if not ok:
+            used_streaming = True
+            run_stream_path(limit=None)
 
 # ---------- TOP ROW ----------
 st.markdown("---")
 c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1], gap="large")
 
 with c1:
-    if spec_name != "UNKNOWN":
-        status_pill(f"Transformation: {spec_name}", "#16a34a")
-    else:
-        status_pill("Transformation: UNKNOWN", "#6b7280")
+    status_pill(f"Transformation: {spec_name if spec_name!='UNKNOWN' else 'UNKNOWN'}",
+                "#16a34a" if spec_name!="UNKNOWN" else "#6b7280")
 
 with c2:
-    # Show processed count (Lite) vs total seen
-    label_items = f"{total_items}"
-    if mode.startswith("Lite"):
-        label_items = f"{min(total_items, len(ids))} / {total_items}"
-    status_pill(f"Items: {label_items}", "#16a34a")
+    if use_sample_mode:
+        status_pill(f"Items: {processed_items} / {total_items}", "#16a34a")
+    else:
+        status_pill(f"Items: {total_items}", "#16a34a")
 
 with c3:
     total_dups = len(dup_id_pairs) + len(dup_link_pairs)
@@ -369,8 +380,7 @@ def safe_get(lst, i, default=""):
     except Exception:
         return default
 
-# When Lite mode is on, indices refer to processed set (0..processed-1)
-# --- Missing fields ---
+# Missing fields
 missing_id_rows = [
     {"id": "(missing)", "link": safe_get(links, i), "image": "yes" if safe_get(images, i) else "no", "availability": safe_get(avails, i) or "(missing)"}
     for i in missing_id_idx
@@ -395,7 +405,7 @@ missing_avail_rows = [
 ]
 show_issue_table("Missing Availability (by product ID)", missing_avail_rows, sample_show)
 
-# --- Bad URL warnings (RAW) ---
+# Bad URL warnings (RAW)
 bad_url_rows = [
     {"id": safe_get(ids, i) or "(missing id)", "raw_url": safe_get(raw_links, i), "encoded_url": safe_get(links, i)}
     for i in bad_url_idx
@@ -408,7 +418,7 @@ bad_img_rows = [
 ]
 show_issue_table("Bad Image URLs (spaces/non-ASCII) — RAW view", bad_img_rows, sample_show)
 
-# --- Duplicates (IDs) ---
+# Duplicates (IDs)
 dup_ids_map: Dict[str, List[int]] = defaultdict(list)
 for old_i, new_i, pid in dup_id_pairs:
     dup_ids_map[pid].extend([old_i, new_i])
@@ -425,7 +435,7 @@ for pid, idxs in dup_ids_map.items():
 dup_id_rows.sort(key=lambda r: (-r["occurrences"], r["id"]))
 show_issue_table("Duplicate IDs (grouped)", dup_id_rows, sample_show)
 
-# --- Duplicates (URLs) ---
+# Duplicates (URLs)
 url_to_ids: Dict[str, List[str]] = defaultdict(list)
 for old_i, new_i, url in dup_link_pairs:
     oid = safe_get(ids, old_i)
@@ -445,9 +455,10 @@ dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"]))
 show_issue_table("Duplicate Product URLs (grouped, with IDs)", dup_url_rows, sample_show)
 
 st.markdown("---")
-st.caption(("Mode: **Lite** shows processed/total item counts and caps processing at "
-            f"{LITE_LIMIT:,} items. Use **Full** to scan everything (may take long)."))
-
+st.caption(
+    ("Scope: Sample first N items (streaming)" if use_sample_mode else
+     f"Scope: Auto (parser: {'Streaming' if (used_streaming:= (is_gzip_path(src_path) or file_size>SMALL_SIZE_LIMIT)) else 'DOM'})")
+)
 st.markdown("© 2025 Raul Bertoldini")
 
 
