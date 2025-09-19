@@ -157,7 +157,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
     "Google Merchant (g:) Atom": {
         "item_paths": [".//{http://www.w3.org/2005/Atom}entry", ".//entry"],
         "id_paths": ["./{http://base.google.com/ns/1.0}id", "./g:id"],
-        "link_paths": ["./{http://base.google.com/ns/1.0}link", "./g:link"],
+        "link_paths": ["./link", "./{http://base.google.com/ns/1.0}link", "./g:link"],
         "image_primary_paths": ["./{http://base.google.com/ns/1.0}image_link", "./g:image_link"],
         "required_fields": ["id", "link", "image_link"],
         "availability_paths": ["./{http://base.google.com/ns/1.0}availability", "./g:availability"],
