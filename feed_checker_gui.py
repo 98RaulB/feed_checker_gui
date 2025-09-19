@@ -1,20 +1,24 @@
 # feed_checker_gui.py
 from __future__ import annotations
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any, Iterable
 import re
 from collections import defaultdict
+import os
+import io
+import gzip
+import tempfile
+
 import streamlit as st
 
 # Shared rules/helpers from your feed_specs.py
 from feed_specs import (
     detect_spec,
-    get_item_nodes,
     read_id,
     read_link,
     read_availability,
     gather_primary_image,
-    read_link_raw,                 # NEW
-    gather_primary_image_raw,      # NEW
+    read_link_raw,                 # RAW (no percent-encoding) to warn on spaces/non-ASCII
+    gather_primary_image_raw,      # RAW
 )
 
 # Safe XML parsing (defusedxml if present)
@@ -25,15 +29,9 @@ except Exception:
 
 st.set_page_config(page_title="Feed Checker (GUI)", layout="wide")
 st.title("🧪 Feed Checker (GUI)")
-st.caption("Uses the shared rules from feed_specs.py so Checker and Fixer always stay in sync.")
+st.caption("Streaming-safe version. Uses iterparse for huge feeds; small feeds still OK.")
 
 # ---------- Small helpers ----------
-def fetch_bytes_from_url(u: str) -> bytes:
-    import requests
-    r = requests.get(u, headers={"User-Agent": "FeedChecker/GUI"}, timeout=45)
-    r.raise_for_status()
-    return r.content
-
 def verdict_row(label: str, ok: bool, warn: bool = False, extra: str = "") -> Tuple[str, str]:
     if ok and not warn:
         return (label, f"✅ PASS {extra}".strip())
@@ -64,39 +62,6 @@ def status_pill(text: str, color: str = "#16a34a"):  # green default
         unsafe_allow_html=True,
     )
 
-def show_sample(title: str, indices: List[int], sample_n: int = 10, red: bool = False):
-    """(Kept for reference; now we prefer ID-based tables below.)"""
-    if not indices:
-        st.write(f"**{title}:** none 🎉")
-        return
-    st.write(f"**{title}:** {len(indices)}")
-    with st.expander(f"Show first {min(sample_n, len(indices))}"):
-        subset = indices[:sample_n]
-        if red:
-            st.markdown(
-                "<ul style='margin-top:0'>"
-                + "".join(f"<li style='color:#dc2626'>item index {i}</li>" for i in subset)
-                + "</ul>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.write(subset)
-
-def is_bad_url(url: str) -> bool:
-    """
-    Warn if a URL contains spaces or non-ASCII characters (e.g., č, ę, кириллица).
-    Note: We only warn; we don't fail the feed on this.
-    """
-    if not url:
-        return False
-    if re.search(r"\s", url):
-        return True
-    if any(ord(ch) > 127 for ch in url):
-        return True
-    return False
-
-# New helpers for ID-based tables
-
 def unique_preserve(xs: List[str]) -> List[str]:
     seen = set()
     out: List[str] = []
@@ -114,133 +79,260 @@ def show_issue_table(title: str, rows: List[Dict], sample_n: int):
     with st.expander(f"Show first {min(sample_n, len(rows))}"):
         st.dataframe(rows[:sample_n], use_container_width=True)
 
+def download_to_tmp(url: str, chunk=1<<20) -> str:
+    """Stream a URL to a temp file (no giant bytes in memory). Returns file path."""
+    import requests
+    with requests.get(url, stream=True, timeout=120, headers={"User-Agent":"FeedChecker/GUI"}) as r:
+        r.raise_for_status()
+        size = int(r.headers.get("Content-Length") or 0)
+        if size and size > 200*1024*1024:
+            st.warning(f"Large feed detected: ~{size/1024/1024:.0f} MB. Switching to streaming parser.")
+        suffix = ".xml.gz" if r.headers.get("Content-Type","").lower().endswith("gzip") or url.lower().endswith(".gz") else ".xml"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        for chunk_bytes in r.iter_content(chunk_size=chunk):
+            if chunk_bytes:
+                tmp.write(chunk_bytes)
+        tmp.flush()
+        tmp.close()
+        return tmp.name
+
+def filelike_from_upload(up) -> io.BufferedReader:
+    """Persist an uploaded file to disk to allow iterparse to stream it."""
+    # Try to infer .gz by magic header
+    head = up.read(2)
+    up.seek(0)
+    is_gz = head == b"\x1f\x8b"
+    suffix = ".xml.gz" if is_gz or (up.name and up.name.lower().endswith(".gz")) else ".xml"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(up.read())
+    tmp.flush(); tmp.close()
+    up.seek(0)
+    return open(tmp.name, "rb")
+
+def open_maybe_gzip(path_or_fileobj):
+    """Return a binary file-like object that yields decompressed bytes if .gz."""
+    if isinstance(path_or_fileobj, (io.BytesIO, io.BufferedReader)):
+        # Peek gzip magic
+        pos = path_or_fileobj.tell()
+        magic = path_or_fileobj.read(2)
+        path_or_fileobj.seek(pos)
+        if magic == b"\x1f\x8b":
+            return gzip.open(path_or_fileobj, "rb")
+        return path_or_fileobj
+    # else it's a path
+    if str(path_or_fileobj).lower().endswith(".gz"):
+        return gzip.open(path_or_fileobj, "rb")
+    return open(path_or_fileobj, "rb")
+
+def iter_items_stream(file_like, guess_item_tags: Iterable[str]=("item","product","offer","entry")):
+    """
+    Stream items with ET.iterparse. Yields (elem, root) for each end-event of an item-like tag.
+    Caller MUST use/read and then call elem.clear(), and occasionally root.clear().
+    """
+    context = ET.iterparse(file_like, events=("start","end"))
+    event, root = next(context)  # grab root for spec detection and clearing
+    # Detect item tags by suffix match (namespace-safe)
+    def is_item_tag(tag: str) -> bool:
+        if not tag:
+            return False
+        bare = tag.split('}',1)[1] if '}' in tag else tag
+        return bare in guess_item_tags
+    for event, elem in context:
+        if event == "end" and is_item_tag(elem.tag):
+            yield elem, root
+            # free processed subtree
+            elem.clear()
+            # light-touch root clear to drop siblings already processed
+            if len(root) > 0 and root[0] is not None:
+                # stdlib ElementTree doesn't have getprevious(); safe to clear root periodically
+                pass
+
 # ---------- Form ----------
 with st.form("input"):
     url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
-    up = st.file_uploader("…or upload an XML file", type=["xml"])
-    colA, colB = st.columns(2)
+    up = st.file_uploader("…or upload an XML file (.xml or .xml.gz)", type=["xml", "gz"])
+    colA, colB, colC = st.columns(3)
     with colA:
         sample_show = st.number_input("Show up to N sample issues per category", 1, 50, 10)
     with colB:
+        mode = st.selectbox("Parse mode", ["Lite (sample items)", "Full (process all items)"])
+    with colC:
         stop_on_first_parse_error = st.checkbox("Stop on XML parse error", value=True)
     submitted = st.form_submit_button("Check feed")
 
-if submitted:
-    # 1) Load bytes
-    xml_bytes = None
-    src_label = None
-    if url.strip():
-        if not url.lower().startswith(("http://", "https://")):
-            st.error("URL must start with http:// or https://")
-            st.stop()
-        try:
-            xml_bytes = fetch_bytes_from_url(url.strip())
-            src_label = url.strip()
-        except Exception as e:
-            st.error(f"Failed to download URL: {e}")
-            st.stop()
-    elif up is not None:
-        xml_bytes = up.read()
+if not submitted:
+    st.markdown("© 2025 Raul Bertoldini")
+    st.stop()
+
+# 1) Obtain a file-like source (path or handle), streaming-friendly
+src_label = None
+path_or_handle: Any = None
+if url.strip():
+    if not url.lower().startswith(("http://", "https://")):
+        st.error("URL must start with http:// or https://")
+        st.stop()
+    try:
+        path_or_handle = download_to_tmp(url.strip())
+        src_label = url.strip()
+    except Exception as e:
+        st.error(f"Failed to download URL: {e}")
+        st.stop()
+elif up is not None:
+    try:
+        fh = filelike_from_upload(up)
+        path_or_handle = fh  # handle
         src_label = up.name
-    else:
-        st.warning("Provide a URL or upload a file.")
+    except Exception as e:
+        st.error(f"Failed to read uploaded file: {e}")
+        st.stop()
+else:
+    st.warning("Provide a URL or upload a file.")
+    st.stop()
+
+st.write(f"**Source:** `{src_label}`")
+
+# 2) Open (with transparent gzip if needed) and bootstrap XML
+try:
+    f = open_maybe_gzip(path_or_handle)
+except Exception as e:
+    st.error(f"Failed opening source: {e}")
+    st.stop()
+
+# We will:
+#  - do a tiny, safe read to assert the XML is parseable;
+#  - then stream with iterparse and compute metrics on the fly.
+
+# ---- Bootstrap root + spec via a small iterparse priming ----
+xml_ok = True
+spec_name = "UNKNOWN"
+total_items = 0
+
+# Collections (same names as your previous code)
+ids: List[str] = []
+links: List[str] = []              # encoded product links
+images: List[str] = []             # encoded primary image
+avails: List[str] = []
+
+missing_id_idx: List[int] = []
+missing_link_idx: List[int] = []
+missing_img_idx: List[int] = []
+missing_avail_idx: List[int] = []
+
+raw_links: List[str] = []
+raw_imgs: List[str] = []
+bad_url_idx: List[int] = []
+bad_img_idx: List[int] = []
+
+id_first_seen: Dict[str, int] = {}
+link_first_seen: Dict[str, int] = {}
+dup_id_pairs: List[Tuple[int, int, str]] = []
+dup_link_pairs: List[Tuple[int, int, str]] = []
+
+ascii_only = re.compile(r'^[\x00-\x7F]+$')
+
+# How many items to process in Lite mode (guardrail)
+LITE_LIMIT = 5000
+
+def process_item(elem, index: int, spec: str):
+    """Extract and update all lists/counters for a single item element."""
+    # Safe/encoded for core checks
+    pid = (read_id(elem, spec) or "").strip()
+    purl = (read_link(elem, spec) or "").strip()
+    pav  = (read_availability(elem, spec) or "").strip()
+    pimg = (gather_primary_image(elem, spec) or "").strip()
+    # RAW values only for 'bad URL' warnings
+    purl_raw = (read_link_raw(elem, spec) or "").strip()
+    pimg_raw = (gather_primary_image_raw(elem, spec) or "").strip()
+
+    ids.append(pid); links.append(purl); images.append(pimg); avails.append(pav)
+    raw_links.append(purl_raw); raw_imgs.append(pimg_raw)
+
+    if not pid: missing_id_idx.append(index)
+    if not purl: missing_link_idx.append(index)
+    if not pimg: missing_img_idx.append(index)
+    if not pav:  missing_avail_idx.append(index)
+
+    if purl_raw and ((" " in purl_raw) or not ascii_only.match(purl_raw)):
+        bad_url_idx.append(index)
+    if pimg_raw and ((" " in pimg_raw) or not ascii_only.match(pimg_raw)):
+        bad_img_idx.append(index)
+
+    if pid:
+        if pid in id_first_seen:
+            dup_id_pairs.append((id_first_seen[pid], index, pid))
+        else:
+            id_first_seen[pid] = index
+
+    if purl:
+        if purl in link_first_seen:
+            dup_link_pairs.append((link_first_seen[purl], index, purl))
+        else:
+            link_first_seen[purl] = index
+
+try:
+    # We need spec_name for read_* helpers. We'll peek root from a fresh iterparse
+    # Note: create a new handle because iterparse consumes the stream.
+    def open_again():
+        if isinstance(path_or_handle, (str, os.PathLike)):
+            return open_maybe_gzip(path_or_handle)
+        # uploaded handle
+        try:
+            path_or_handle.seek(0)
+        except Exception:
+            pass
+        return open_maybe_gzip(path_or_handle)
+
+    # Pass 1: detect spec_name quickly
+    with open_again() as fh1:
+        context1 = ET.iterparse(fh1, events=("start",))
+        _, root_first = next(context1)  # first start is root
+        spec_name = detect_spec(root_first) or "UNKNOWN"
+        # If we got here, XML is at least syntactically OK up to root
+        st.success("XML syntax: OK")
+
+    # Pass 2: real streaming pass to process items
+    processed = 0
+    limit = None if mode == "Full (process all items)" else LITE_LIMIT
+    with open_again() as fh2:
+        for elem, root in iter_items_stream(fh2):
+            total_items += 1
+            # Skip processing after limit in Lite mode, but keep counting items for display
+            if limit is not None and processed >= limit:
+                continue
+            process_item(elem, processed, spec_name)
+            processed += 1
+
+except ET.ParseError as e:
+    xml_ok = False
+    st.error(f"XML syntax: ERROR — {e}")
+    if stop_on_first_parse_error:
         st.stop()
 
-    st.write(f"**Source:** `{src_label}`")
+# ---------- TOP ROW ----------
+st.markdown("---")
+c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1], gap="large")
 
-    # 2) Parse XML
-    xml_ok = True
-    try:
-        root = ET.fromstring(xml_bytes)
-        st.success("XML syntax: OK")
-    except ET.ParseError as e:
-        xml_ok = False
-        st.error(f"XML syntax: ERROR — {e}")
-        if stop_on_first_parse_error:
-            st.stop()
+with c1:
+    if spec_name != "UNKNOWN":
+        status_pill(f"Transformation: {spec_name}", "#16a34a")
+    else:
+        status_pill("Transformation: UNKNOWN", "#6b7280")
 
-    # 3) Detect transformation
-    spec_name = detect_spec(root) if xml_ok else "UNKNOWN"
+with c2:
+    # Show processed count (Lite) vs total seen
+    label_items = f"{total_items}"
+    if mode.startswith("Lite"):
+        label_items = f"{min(total_items, len(ids))} / {total_items}"
+    status_pill(f"Items: {label_items}", "#16a34a")
 
-    # 4) Collect items & run checks
-    items = get_item_nodes(root, spec_name) if spec_name != "UNKNOWN" else []
-    total_items = len(items)
-
-    ids: List[str] = []
-    links: List[str] = []              # encoded product links (used for duplicates, display)
-    images: List[str] = []             # encoded primary image (display)
-    avails: List[str] = []             # availability
-
-    missing_id_idx: List[int] = []
-    missing_link_idx: List[int] = []
-    missing_img_idx: List[int] = []
-    missing_avail_idx: List[int] = []
-
-    # NEW: raw URLs for warning checks
-    raw_links: List[str] = []          # raw product links (for whitespace/non-ASCII warning)
-    raw_imgs: List[str] = []           # raw primary image URLs (for whitespace/non-ASCII warning)
-    bad_url_idx: List[int] = []        # indices with suspicious product URLs (raw)
-    bad_img_idx: List[int] = []        # indices with suspicious image URLs (raw)
-
-    # Track duplicates with first-seen index
-    id_first_seen: Dict[str, int] = {}
-    link_first_seen: Dict[str, int] = {}
-    dup_id_pairs: List[Tuple[int, int, str]] = []
-    dup_link_pairs: List[Tuple[int, int, str]] = []
-
-    ascii_only = re.compile(r'^[\x00-\x7F]+$')  # ASCII-only check for warnings
-
-    for i, it in enumerate(items):
-        # encoded (safe) versions for normal checks
-        pid = (read_id(it, spec_name) or "").strip()
-        purl = (read_link(it, spec_name) or "").strip()
-        pav  = (read_availability(it, spec_name) or "").strip()
-        pimg = (gather_primary_image(it, spec_name) or "").strip()
-
-        # RAW versions only for “bad URL” detection
-        purl_raw = (read_link_raw(it, spec_name) or "").strip()
-        pimg_raw = (gather_primary_image_raw(it, spec_name) or "").strip()
-
-        ids.append(pid)
-        links.append(purl)
-        images.append(pimg)
-        avails.append(pav)
-
-        raw_links.append(purl_raw)
-        raw_imgs.append(pimg_raw)
-
-        if not pid:
-            missing_id_idx.append(i)
-        if not purl:
-            missing_link_idx.append(i)
-        if not pimg:
-            missing_img_idx.append(i)
-        if not pav:
-            missing_avail_idx.append(i)
-
-        # --- Bad URL warnings (spaces or non-ASCII) on RAW values only
-        if purl_raw and ((" " in purl_raw) or not ascii_only.match(purl_raw)):
-            bad_url_idx.append(i)
-        if pimg_raw and ((" " in pimg_raw) or not ascii_only.match(pimg_raw)):
-            bad_img_idx.append(i)
-
-        # duplicates (id)
-        if pid:
-            if pid in id_first_seen:
-                dup_id_pairs.append((id_first_seen[pid], i, pid))
-            else:
-                id_first_seen[pid] = i
-
-        # duplicates (link) — use ENCODED links to avoid false dupes due to encoding
-        if purl:
-            if purl in link_first_seen:
-                dup_link_pairs.append((link_first_seen[purl], i, purl))
-            else:
-                link_first_seen[purl] = i
-
+with c3:
     total_dups = len(dup_id_pairs) + len(dup_link_pairs)
+    status_pill(f"Duplicates: {total_dups}", "#dc2626" if total_dups > 0 else "#16a34a")
 
-    # >>> IMPORTANT: compute warnings AFTER lists are filled <<<
+with c4:
+    status_pill(f"Missing IDs: {len(missing_id_idx)}", "#dc2626" if len(missing_id_idx)>0 else "#16a34a")
+
+with c5:
     total_warnings = (
         len(missing_link_idx)
         + len(missing_img_idx)
@@ -249,143 +341,114 @@ if submitted:
         + len(bad_img_idx)
     )
     any_warnings = total_warnings > 0
+    status_pill(f"Warnings: {total_warnings}", "#f59e0b" if any_warnings else "#16a34a")
 
-    # ---------- TOP ROW ----------
-    st.markdown("---")
-    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1], gap="large")
+# ---------- SUMMARY ----------
+pass_fail: Dict[str, Tuple[bool, bool, str]] = {}
+pass_fail["XML syntax"] = (xml_ok, False, "")
+pass_fail["Transformation detected"] = (spec_name != "UNKNOWN", False, spec_name if spec_name != "UNKNOWN" else "")
+pass_fail["IDs present"] = (len(missing_id_idx) == 0, False, f"(missing: {len(missing_id_idx)})")
+pass_fail["Duplicate IDs"] = (len(dup_id_pairs) == 0, False, f"(duplicates: {len(dup_id_pairs)})")
+pass_fail["Duplicate Product URLs"] = (len(dup_link_pairs) == 0, False, f"(duplicates: {len(dup_link_pairs)})")
+pass_fail["Product URL present"] = (True, len(missing_link_idx) > 0, f"(missing: {len(missing_link_idx)})")
+pass_fail["Primary image present"] = (True, len(missing_img_idx) > 0, f"(missing: {len(missing_img_idx)})")
+pass_fail["Availability present"] = (True, len(missing_avail_idx) > 0, f"(missing: {len(missing_avail_idx)})")
+pass_fail["Product URL validity"] = (True, len(bad_url_idx) > 0, f"(bad: {len(bad_url_idx)})")
+pass_fail["Image URL validity"] = (True, len(bad_img_idx) > 0, f"(bad: {len(bad_img_idx)})")
 
-    with c1:
-        if spec_name != "UNKNOWN":
-            status_pill(f"Transformation: {spec_name}", "#16a34a")  # green
-        else:
-            status_pill("Transformation: UNKNOWN", "#6b7280")       # gray
+st.markdown("---")
+summarize(pass_fail)
 
-    with c2:
-        status_pill(f"Items: {total_items}", "#16a34a")             # always green
+# ---------- DETAILS ----------
+st.markdown("---")
+st.subheader("Details")
 
-    with c3:
-        if total_dups > 0:
-            status_pill(f"Duplicates: {total_dups}", "#dc2626")
-        else:
-            status_pill("Duplicates: 0", "#16a34a")
+def safe_get(lst, i, default=""):
+    try:
+        return lst[i]
+    except Exception:
+        return default
 
-    with c4:
-        if len(missing_id_idx) > 0:
-            status_pill(f"Missing IDs: {len(missing_id_idx)}", "#dc2626")  # RED if any
-        else:
-            status_pill("Missing IDs: 0", "#16a34a")
+# When Lite mode is on, indices refer to processed set (0..processed-1)
+# --- Missing fields ---
+missing_id_rows = [
+    {"id": "(missing)", "link": safe_get(links, i), "image": "yes" if safe_get(images, i) else "no", "availability": safe_get(avails, i) or "(missing)"}
+    for i in missing_id_idx
+]
+show_issue_table("Missing ID (by example values)", missing_id_rows, sample_show)
 
-    with c5:
-        if any_warnings:
-            status_pill(f"Warnings: {total_warnings}", "#f59e0b")   # amber/orange if any
-        else:
-            status_pill("Warnings: 0", "#16a34a")
+missing_link_rows = [
+    {"id": safe_get(ids, i), "link": "(missing)", "image": "yes" if safe_get(images, i) else "no", "availability": safe_get(avails, i) or "(missing)"}
+    for i in missing_link_idx if safe_get(ids, i)
+]
+show_issue_table("Missing Product URL (by product ID)", missing_link_rows, sample_show)
 
+missing_img_rows = [
+    {"id": safe_get(ids, i), "link": safe_get(links, i), "primary_image": "(missing)"}
+    for i in missing_img_idx if safe_get(ids, i)
+]
+show_issue_table("Missing Primary Image (by product ID)", missing_img_rows, sample_show)
 
-    # ---------- SUMMARY ----------
-    pass_fail: Dict[str, Tuple[bool, bool, str]] = {}
-    pass_fail["XML syntax"] = (xml_ok, False, "")
-    pass_fail["Transformation detected"] = (spec_name != "UNKNOWN", False, spec_name if spec_name != "UNKNOWN" else "")
-    pass_fail["IDs present"] = (len(missing_id_idx) == 0, False, f"(missing: {len(missing_id_idx)})")
-    pass_fail["Duplicate IDs"] = (len(dup_id_pairs) == 0, False, f"(duplicates: {len(dup_id_pairs)})")
-    pass_fail["Duplicate Product URLs"] = (len(dup_link_pairs) == 0, False, f"(duplicates: {len(dup_link_pairs)})")
-    pass_fail["Product URL present"] = (True, len(missing_link_idx) > 0, f"(missing: {len(missing_link_idx)})")
-    pass_fail["Primary image present"] = (True, len(missing_img_idx) > 0, f"(missing: {len(missing_img_idx)})")
-    pass_fail["Availability present"] = (True, len(missing_avail_idx) > 0, f"(missing: {len(missing_avail_idx)})")
-    # New: URL validity warnings (bad = spaces or non-ASCII)
-    pass_fail["Product URL validity"] = (True, len(bad_url_idx) > 0, f"(bad: {len(bad_url_idx)})")
-    pass_fail["Image URL validity"] = (True, len(bad_img_idx) > 0, f"(bad: {len(bad_img_idx)})")
+missing_avail_rows = [
+    {"id": safe_get(ids, i), "link": safe_get(links, i), "availability": "(missing)"}
+    for i in missing_avail_idx if safe_get(ids, i)
+]
+show_issue_table("Missing Availability (by product ID)", missing_avail_rows, sample_show)
 
-    st.markdown("---")
-    summarize(pass_fail)
+# --- Bad URL warnings (RAW) ---
+bad_url_rows = [
+    {"id": safe_get(ids, i) or "(missing id)", "raw_url": safe_get(raw_links, i), "encoded_url": safe_get(links, i)}
+    for i in bad_url_idx
+]
+show_issue_table("Bad Product URLs (spaces/non-ASCII) — RAW view", bad_url_rows, sample_show)
 
-    # ---------- DETAILS (ID-based) ----------
-    st.markdown("---")
-    st.subheader("Details")
+bad_img_rows = [
+    {"id": safe_get(ids, i) or "(missing id)", "raw_image_url": safe_get(raw_imgs, i), "encoded_image_url": safe_get(images, i)}
+    for i in bad_img_idx
+]
+show_issue_table("Bad Image URLs (spaces/non-ASCII) — RAW view", bad_img_rows, sample_show)
 
-    # --- Missing fields ---
-    # When ID is missing we can't show an ID; show link/image/availability to locate the row.
-    missing_id_rows = [
-        {
-            "id": "(missing)",
-            "link": links[i],
-            "image": "yes" if images[i] else "no",
-            "availability": avails[i] or "(missing)"
-        }
-        for i in missing_id_idx
-    ]
-    show_issue_table("Missing ID (by example values)", missing_id_rows, sample_show)
+# --- Duplicates (IDs) ---
+dup_ids_map: Dict[str, List[int]] = defaultdict(list)
+for old_i, new_i, pid in dup_id_pairs:
+    dup_ids_map[pid].extend([old_i, new_i])
 
-    missing_link_rows = [
-        {"id": ids[i], "link": "(missing)", "image": "yes" if images[i] else "no", "availability": avails[i] or "(missing)"}
-        for i in missing_link_idx if ids[i]
-    ]
-    show_issue_table("Missing Product URL (by product ID)", missing_link_rows, sample_show)
+dup_id_rows = []
+for pid, idxs in dup_ids_map.items():
+    idxs_u = unique_preserve([str(x) for x in idxs])
+    ex_links = unique_preserve([safe_get(links, int(i)) for i in idxs_u if safe_get(links, int(i))])[:3]
+    dup_id_rows.append({
+        "id": pid,
+        "occurrences": len(unique_preserve([str(int(i)) for i in idxs])),
+        "example_links": " | ".join(ex_links) if ex_links else ""
+    })
+dup_id_rows.sort(key=lambda r: (-r["occurrences"], r["id"]))
+show_issue_table("Duplicate IDs (grouped)", dup_id_rows, sample_show)
 
-    missing_img_rows = [
-        {"id": ids[i], "link": links[i], "primary_image": "(missing)"}
-        for i in missing_img_idx if ids[i]
-    ]
-    show_issue_table("Missing Primary Image (by product ID)", missing_img_rows, sample_show)
+# --- Duplicates (URLs) ---
+url_to_ids: Dict[str, List[str]] = defaultdict(list)
+for old_i, new_i, url in dup_link_pairs:
+    oid = safe_get(ids, old_i)
+    nid = safe_get(ids, new_i)
+    if oid: url_to_ids[url].append(oid)
+    if nid: url_to_ids[url].append(nid)
 
-    missing_avail_rows = [
-        {"id": ids[i], "link": links[i], "availability": "(missing)"}
-        for i in missing_avail_idx if ids[i]
-    ]
-    show_issue_table("Missing Availability (by product ID)", missing_avail_rows, sample_show)
+dup_url_rows = []
+for url, idlist in url_to_ids.items():
+    ids_u = unique_preserve(idlist)
+    dup_url_rows.append({
+        "url": url,
+        "num_ids": len(ids_u),
+        "ids": ", ".join(ids_u[:12]) + (" …" if len(ids_u) > 12 else "")
+    })
+dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"]))
+show_issue_table("Duplicate Product URLs (grouped, with IDs)", dup_url_rows, sample_show)
 
-    # --- Bad URL warnings (RAW) ---
-    bad_url_rows = [
-        {"id": ids[i] or "(missing id)", "raw_url": raw_links[i], "encoded_url": links[i]}
-        for i in bad_url_idx
-    ]
-    show_issue_table("Bad Product URLs (spaces/non-ASCII) — RAW view", bad_url_rows, sample_show)
-
-    bad_img_rows = [
-        {"id": ids[i] or "(missing id)", "raw_image_url": raw_imgs[i], "encoded_image_url": images[i]}
-        for i in bad_img_idx
-    ]
-    show_issue_table("Bad Image URLs (spaces/non-ASCII) — RAW view", bad_img_rows, sample_show)
-
-    # --- Duplicates (IDs) -> show where they appear + example links ---
-    dup_ids_map: Dict[str, List[int]] = defaultdict(list)
-    for old_i, new_i, pid in dup_id_pairs:
-        dup_ids_map[pid].extend([old_i, new_i])
-
-    dup_id_rows = []
-    for pid, idxs in dup_ids_map.items():
-        idxs_u = unique_preserve([str(x) for x in idxs])
-        # example links from occurrences
-        ex_links = unique_preserve([links[int(i)] for i in idxs_u if int(i) < len(links) and links[int(i)]])[:3]
-        dup_id_rows.append({
-            "id": pid,
-            "occurrences": len(unique_preserve([str(int(i)) for i in idxs])),
-            "example_links": " | ".join(ex_links) if ex_links else ""
-        })
-    dup_id_rows.sort(key=lambda r: (-r["occurrences"], r["id"]))
-    show_issue_table("Duplicate IDs (grouped)", dup_id_rows, sample_show)
-
-    # --- Duplicates (URLs) -> show which IDs share the same URL ---
-    url_to_ids: Dict[str, List[str]] = defaultdict(list)
-    for old_i, new_i, url in dup_link_pairs:
-        if old_i < len(ids) and ids[old_i]:
-            url_to_ids[url].append(ids[old_i])
-        if new_i < len(ids) and ids[new_i]:
-            url_to_ids[url].append(ids[new_i])
-
-    dup_url_rows = []
-    for url, idlist in url_to_ids.items():
-        ids_u = unique_preserve(idlist)
-        dup_url_rows.append({
-            "url": url,
-            "num_ids": len(ids_u),
-            "ids": ", ".join(ids_u[:12]) + (" …" if len(ids_u) > 12 else "")
-        })
-    dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"]))
-    show_issue_table("Duplicate Product URLs (grouped, with IDs)", dup_url_rows, sample_show)
-
-    st.markdown("---")
+st.markdown("---")
+st.caption(("Mode: **Lite** shows processed/total item counts and caps processing at "
+            f"{LITE_LIMIT:,} items. Use **Full** to scan everything (may take long)."))
 
 st.markdown("© 2025 Raul Bertoldini")
+
 
 
