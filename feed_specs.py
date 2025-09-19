@@ -191,21 +191,32 @@ SPEC: Dict[str, Dict[str, Any]] = {
     },
     
     "Heureka strict": {
-        "item_paths": [".//SHOPITEM"],
-        "id_paths": ["./ITEM_ID"],
-        "link_paths": ["./URL"],
-        "image_primary_paths": ["./IMGURL"],
-        "required_fields": ["ITEM_ID", "PRODUCTNAME", "URL", "IMGURL"],
-        "availability_paths": ["./AVAILABILITY", "./DELIVERY", "./delivery", "./AVAILABILITY_DESC", "./DELIVERY_DATE"],
+        "item_paths": [".//SHOPITEM", ".//shopitem", ".//ShopItem"],  # support case variants
+        # IDs: prefer ITEM_ID, but accept lowercase or (rare) ITEMGROUP_ID as fallback
+        "id_paths": ["./ITEM_ID", "./item_id", "./ItemId", "./ITEMGROUP_ID", "./itemgroup_id"],
+        # Links: accept URL/url
+        "link_paths": ["./URL", "./Url", "./url"],
+        # Primary image: try IMGURL first; if missing, we’ll fall back to gallery below
+        "image_primary_paths": ["./IMGURL", "./ImgUrl", "./imgurl"],
+        # Gallery: most Heureka feeds put extras in IMGURL_ALTERNATIVE repeating nodes
+        "image_gallery_paths": ["./IMGURL_ALTERNATIVE", "./ImgUrl_Alternative", "./imgurl_alternative"],
+        "required_fields": ["ITEM_ID|item_id", "PRODUCTNAME|productname", "URL|url", "IMGURL|imgurl"],
+        "availability_paths": [
+            "./AVAILABILITY", "./availability",
+            "./DELIVERY", "./delivery",
+            "./AVAILABILITY_DESC", "./availability_desc",
+            "./DELIVERY_DATE", "./delivery_date"
+        ],
         "availability_aliases": ["availability", "delivery", "availability_desc", "delivery_date"],
         "signature_tags": [
-            "item_id","productname","description","url","imgurl","price","manufacturer",
-            "categorytext","availability","delivery","delivery_time"
+            "item_id","productname","description","url","imgurl","imgurl_alternative","price",
+            "manufacturer","categorytext","availability","delivery","delivery_time","delivery_date"
         ],
         "expected_root_locals": ["shop"],
         # Special rule from your checker’s behavior: DELIVERY_DATE < 3 => “in stock”
         "special": {"heureka_delivery_date_to_availability": True},
     },
+    
     "Compari / Árukereső / Pazaruvaj (case-insensitive)": {
         "item_paths": [".//product"],
         "id_paths": ["./Identifier", "./identifier", "./ProductId", "./productid", "./id"],
