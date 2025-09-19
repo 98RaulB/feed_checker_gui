@@ -4,13 +4,14 @@ from typing import List, Tuple, Dict, Any, Iterable
 import re
 from collections import defaultdict
 import os
-import io
 import gzip
 import tempfile
 import streamlit as st
 
 # Shared rules/helpers from your feed_specs.py
 from feed_specs import (
+    SPEC,
+    strip_ns,
     detect_spec,
     get_item_nodes,               # used in DOM path
     read_id,
@@ -83,39 +84,19 @@ def show_issue_table(title: str, rows: List[Dict], sample_n: int):
     with st.expander(f"Show first {min(sample_n, len(rows))}"):
         st.dataframe(rows[:sample_n], use_container_width=True)
 
-# ---------- Tag matching helpers (prevents 'Items: 0' when tag name differs) ----------
+# ---------- Tag helpers ----------
 def localname(tag: str) -> str:
     return tag.split('}', 1)[1] if '}' in tag else tag
 
-# Very forgiving defaults
-DEFAULT_ITEM_TAGS = {
-    # lower/upper/common
-    "item","ITEM","product","PRODUCT","offer","OFFER","entry","ENTRY",
-    # marketplace/feed aliases
-    "shopitem","SHOPITEM","offeritem","OFFERITEM","productitem","PRODUCTITEM",
-    "shopItem","ShopItem","Product","Offer","Entry",
-}
-
-# Spec-to-tag mapping (tune as needed)
-ITEM_TAGS_BY_SPEC = {
-    # Heureka/Ceneo-like
-    "HEUREKA": {"SHOPITEM","shopitem","ShopItem"},
-    "CENEO": {"offer","Offer","OFFER","SHOPITEM","shopitem"},
-    # Google/Atom/RSS
-    "GOOGLE": {"item","entry"},
-    "ATOM": {"entry","ENTRY"},
-    "RSS": {"item","ITEM"},
-    # Skroutz/Compari/Ceneje examples (adjust as encountered)
-    "SKROUTZ": {"item","offer","product"},
-    "COMPARI": {"product","offer","item"},
-    "CENEJE": {"item","offer","product"},
-    # Fallback
-    "UNKNOWN": set(),
-}
-
-def guess_item_tag_set(spec_name: str) -> set[str]:
-    base = set(ITEM_TAGS_BY_SPEC.get((spec_name or "UNKNOWN").upper(), set()))
-    return (base | set(DEFAULT_ITEM_TAGS))
+def localnames_from_item_paths(spec_name: str) -> set[str]:
+    """Derive the set of valid item tag localnames from SPEC.item_paths for this spec."""
+    paths = SPEC.get(spec_name, {}).get("item_paths", [])
+    names = set()
+    for p in paths:
+        last = p.split("/")[-1].strip(".")  # e.g. "SHOPITEM", "{ns}entry", "product"
+        if last:
+            names.add(strip_ns(last))
+    return names
 
 # ---------- I/O helpers ----------
 def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> str:
@@ -161,12 +142,12 @@ def open_maybe_gzip(path: str):
     return gzip.open(path, "rb") if is_gzip_path(path) else open(path, "rb")
 
 # ---------- Streaming parser ----------
-def iter_items_stream(file_like, guess_item_tags: Iterable[str]):
+def iter_items_stream(file_like, wanted_localnames: Iterable[str]):
     """
-    Stream items with ET.iterparse. Yields (elem, root) for each end-event of an item-like tag.
-    Caller should elem.clear() after processing to free memory.
+    Stream items with ET.iterparse. Yields (elem, root) for each end-event of a tag
+    whose localname is in wanted_localnames. Caller must elem.clear() after processing.
     """
-    want = set(guess_item_tags)
+    want = set(wanted_localnames)
     context = ET.iterparse(file_like, events=("start","end"))
     event, root = next(context)  # root element
 
@@ -215,7 +196,7 @@ if not submitted:
 
 # 1) Get a file on disk
 if url.strip():
-    if not url.lower().startswith(("http://", "https://")):
+    if not url.lower().startsWith(("http://", "https://")):  # guard
         st.error("URL must start with http:// or https://"); st.stop()
     try:
         src_path = download_to_tmp(url.strip())
@@ -340,18 +321,34 @@ def run_stream_path(limit: int | None):
             spec_name = spec_name_local
             st.success("XML syntax: OK")
 
-        # Figure out which item tags to look for, and show a small hint
-        item_tags = guess_item_tag_set(spec_name)
-        st.caption("Looking for item tags: " + ", ".join(sorted(list(item_tags))[:8]) + ("…" if len(item_tags)>8 else ""))
+        # Build exact set of item tag localnames from SPEC (no broad fallback for known specs)
+        if spec_name and spec_name.upper() != "UNKNOWN":
+            item_tags = localnames_from_item_paths(spec_name)
+            if not item_tags:
+                # Extreme fallback if SPEC had no paths (unlikely)
+                item_tags = {"item", "entry", "offer"}
+        else:
+            # Unknown feeds → generous fallback
+            item_tags = {"item", "entry", "offer", "product"}
+
+        st.caption("Looking for item tags: " + ", ".join(sorted(list(item_tags))))
 
         # Full streaming pass
         processed = 0
         with open_maybe_gzip(src_path) as fh2:
-            for elem, root in iter_items_stream(fh2, guess_item_tags=item_tags):
-                total_items += 1
-                if limit is not None and processed >= limit:
-                    # keep counting total_items beyond limit without processing
+            for elem, root in iter_items_stream(fh2, wanted_localnames=item_tags):
+                # Guard: count as item only if at least ID or Link exists for this spec
+                pid_peek = (read_id(elem, spec_name) or "").strip()
+                purl_peek = (read_link(elem, spec_name) or "").strip()
+                if not pid_peek and not purl_peek:
                     continue
+
+                total_items += 1
+
+                if limit is not None and processed >= limit:
+                    # keep counting total_items beyond limit without extraction
+                    continue
+
                 process_item(elem, processed, spec_name)
                 processed += 1
         processed_items = processed
@@ -517,6 +514,3 @@ st.caption(
      f"Scope: Auto (parser: {'Streaming' if (is_gzip_path(src_path) or file_size>SMALL_SIZE_LIMIT) else 'DOM'})")
 )
 st.markdown("© 2025 Raul Bertoldini")
-
-
-
