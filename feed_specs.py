@@ -154,10 +154,21 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "expected_root_locals": ["rss"],
         "required_ns_fragments": ["base.google.com/ns/1.0"],
     },
+    
     "Google Merchant (g:) Atom": {
         "item_paths": [".//{http://www.w3.org/2005/Atom}entry", ".//entry"],
         "id_paths": ["./{http://base.google.com/ns/1.0}id", "./g:id"],
-        "link_paths": ["./link", "./{http://base.google.com/ns/1.0}link", "./g:link"],
+        # ⬇️ Replace your current link_paths with this list
+        "link_paths": [
+            "./atom:link[@rel='alternate']/@href",     # preferred Atom form
+            "./atom:link/@href",                       # any Atom link with href
+            "./{http://www.w3.org/2005/Atom}link/@href",
+            "./atom:link",                             # (less common) text inside <link>...</link>
+            "./{http://www.w3.org/2005/Atom}link",
+            "./link",                                  # bad feeds that drop the ns
+            "./g:link",                                # very rare, but harmless fallback
+            "./{http://base.google.com/ns/1.0}link",
+        ],
         "image_primary_paths": ["./{http://base.google.com/ns/1.0}image_link", "./g:image_link"],
         "required_fields": ["id", "link", "image_link"],
         "availability_paths": ["./{http://base.google.com/ns/1.0}availability", "./g:availability"],
