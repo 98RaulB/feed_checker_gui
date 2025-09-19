@@ -231,7 +231,7 @@ dup_link_pairs: List[Tuple[int, int, str]] = []
 ascii_only = re.compile(r'^[\x00-\x7F]+$')
 
 # How many items to process in Lite mode (guardrail)
-LITE_LIMIT = 3000
+LITE_LIMIT = 30000
 
 def process_item(elem, index: int, spec: str):
     """Extract and update all lists/counters for a single item element."""
