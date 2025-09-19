@@ -24,33 +24,25 @@ def read_link_raw(elem: ET.Element, spec_name: str) -> str:
     return _first(elem, SPEC.get(spec_name, {}).get("link_paths", []))
 
 def _looks_like_google_without_ns(root: ET.Element) -> bool:
-    """
-    Heuristic: <rss> root, has <item>, and inside <item> we see common
-    Google tag names (id, link, image_link, price, availability) WITHOUT the g: namespace.
-    Also ensure the Google namespace string is NOT present.
-    """
     try:
         root_xml = ET.tostring(root, encoding="utf-8", method="xml")
     except Exception:
         root_xml = b""
-
     if b"base.google.com/ns/1.0" in root_xml:
-        return False  # it actually has g:, so not this case
-
-    root_local = strip_ns(root.tag).lower()
-    if root_local != "rss":
+        return False
+    if strip_ns(root.tag).lower() != "rss":
         return False
 
-    first_item = root.find(".//item")
-    if first_item is None:
+    items = root.findall(".//item")[:5]  # look at up to 5 items
+    if not items:
         return False
-
-    # collect child local tag names of the first item
-    locals_ = {strip_ns(c.tag).lower() for c in list(first_item)}
-    googleish = {"id", "link", "image_link", "price", "availability", "product_type", "title", "description"}
-    # require at least a minimal core set
-    core = {"id", "link", "image_link"}
-    return (len(locals_ & googleish) >= 3) and (core <= locals_)
+    googleish = {"id","link","image_link","price","availability","product_type","title","description"}
+    core = {"id","link","image_link"}
+    for it in items:
+        locals_ = {strip_ns(c.tag).lower() for c in list(it)}
+        if core <= locals_ and len(locals_ & googleish) >= 3:
+            return True
+    return False
 
 def gather_primary_image_raw(elem: ET.Element, spec_name: str) -> str:
     paths = SPEC.get(spec_name, {}).get("image_primary_paths", [])
@@ -203,7 +195,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "id_paths": ["./ITEM_ID"],
         "link_paths": ["./URL"],
         "image_primary_paths": ["./IMGURL"],
-        "required_fields": ["item_id", "productname", "url", "imgurl"],
+        "required_fields": ["ITEM_ID", "PRODUCTNAME", "URL", "IMGURL"],
         "availability_paths": ["./AVAILABILITY", "./DELIVERY", "./delivery", "./AVAILABILITY_DESC", "./DELIVERY_DATE"],
         "availability_aliases": ["availability", "delivery", "availability_desc", "delivery_date"],
         "signature_tags": [
