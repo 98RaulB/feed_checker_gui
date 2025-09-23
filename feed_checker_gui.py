@@ -572,7 +572,7 @@ for url, idlist in url_to_ids.items():
         "num_ids": len(ids_u),
         "ids": ", ".join(ids_u[:12]) + (" …" if len(ids_u) > 12 else "")
     })
-dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"]])
+dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"])
 show_issue_table("Duplicate Product URLs (grouped, with IDs)", dup_url_rows, sample_show)
 
 st.markdown("---")
