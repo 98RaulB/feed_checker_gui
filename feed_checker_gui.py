@@ -29,7 +29,7 @@ except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
 st.set_page_config(page_title="FAVI Feed Checker", layout="wide")
-st.title("🧪 Feed Checker (GUI)")
+st.title("🧪 FAVI Feed Checker")
 st.caption("Auto mode for small vs large feeds; optional Sample mode to process only the first N items (streaming & low RAM).")
 
 # --------- Tuning ----------
