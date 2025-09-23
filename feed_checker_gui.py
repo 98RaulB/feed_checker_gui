@@ -522,10 +522,9 @@ pass_fail["Availability present"] = (True, len(missing_avail_idx) > 0, f"(missin
 pass_fail["Product URL validity"] = (True, len(bad_url_idx) > 0, f"(bad: {len(bad_url_idx)})")
 pass_fail["Image URL validity"] = (True, len(bad_img_idx) > 0, f"(bad: {len(bad_img_idx)})")
 
-# PRICE summary lines
-pass_fail["Price present"] = (len(missing_price_idx) == 0, False, f"(missing: {len(missing_price_idx)})")
-pass_fail["Price numeric > 0"] = (len(bad_price_idx) == 0, False, f"(invalid: {len(bad_price_idx)})")
-# FAVI format rules: treat as WARNs so shops see why (you can flip to FAIL if desired)
+# PRICE summary lines (all as WARNs, never FAIL)
+pass_fail["Price present"] = (True, len(missing_price_idx) > 0, f"(missing: {len(missing_price_idx)})")
+pass_fail["Price numeric > 0"] = (True, len(bad_price_idx) > 0, f"(invalid: {len(bad_price_idx)})")
 pass_fail["Price format follows FAVI rules"] = (True, len(invalid_price_format_idx) > 0,
                                                f"(invalid format: {len(invalid_price_format_idx)})")
 pass_fail["Price precision (<= 2 decimals)"] = (True, len(overprecision_price_idx) > 0,
