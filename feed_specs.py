@@ -1,6 +1,7 @@
 # feed_specs.py
 from __future__ import annotations
 from typing import Dict, List, Tuple, Any
+import re  # <-- needed for price parsing
 
 # Safe XML parsing
 try:
@@ -23,29 +24,96 @@ def strip_ns(tag: str) -> str:
 def read_link_raw(elem: ET.Element, spec_name: str) -> str:
     return _first(elem, SPEC.get(spec_name, {}).get("link_paths", []))
 
+# ---------- PRICE HELPERS (generic) ----------
+_CURRENCY_ALIASES = {
+    "kč": "CZK", "czk": "CZK",
+    "zł": "PLN", "pln": "PLN",
+    "ft": "HUF", "huf": "HUF",
+    "lei": "RON", "ron": "RON",
+    "лв": "BGN", "bgn": "BGN",
+    "rsd": "RSD",
+    "bam": "BAM",
+    "eur": "EUR", "€": "EUR",
+    "usd": "USD", "$": "USD",
+    "gbp": "GBP", "£": "GBP",
+    "hrk": "HRK",  # legacy HR
+}
+
+# finds "1 234,50" / "1,234.50" / "1234" / "1234.9" / "1234,9"
+_price_num_re = re.compile(r"[-+]?\d{1,3}(?:[ .,\u00A0]?\d{3})*(?:[.,]\d+)?|[-+]?\d+(?:[.,]\d+)?")
+
+def _normalize_amount(txt: str) -> float | None:
+    """Extract first numeric-like token and normalize to float."""
+    if not txt:
+        return None
+    m = _price_num_re.search(txt)
+    if not m:
+        return None
+    raw = m.group(0)
+    s = raw.replace("\u00A0", " ").strip()
+    s = s.replace(" ", "")  # spaces as thousand sep
+
+    # If both separators appear, treat the rightmost as decimal, the other as thousands
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "")
+            s = s.replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    else:
+        # Only one (or none)
+        if s.count(",") == 1 and s.rfind(",") >= len(s) - 3:
+            s = s.replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+def _normalize_currency(txt: str) -> str | None:
+    if not txt:
+        return None
+    t = txt.strip().lower()
+    for alias, code in _CURRENCY_ALIASES.items():
+        if alias in t:
+            return code
+    m = re.search(r"\b([A-Z]{3})\b", txt.upper())
+    if m:
+        return m.group(1)
+    return None
+
+def parse_price_text(raw_text: str) -> tuple[float | None, str | None]:
+    """Return (amount, currency) parsed from raw text like '1 234,50 CZK' or 'EUR 99.90'."""
+    if not raw_text:
+        return None, None
+    amt = _normalize_amount(raw_text)
+    cur = _normalize_currency(raw_text)
+    return amt, cur
+
 def read_price_text(elem: ET.Element, spec_name: str) -> str:
     """
     Return the raw textual price as found in the element, with spec-specific paths first,
     then generic fallbacks. Does NOT normalize; use parse_price_text() for that.
     """
     spec = SPEC.get(spec_name, {})
-    paths: list[str] = spec.get("price_paths", [])
+    paths: List[str] = spec.get("price_paths", [])
 
-    # Sensible defaults if spec didn't define anything
+    # Fallbacks (cover broad ecosystems; SPEC paths take precedence)
     fallback_paths = [
-        "g:price", "g:sale_price",          # Google Merchant
-        "price", "PRICE", "Price",
-        "min_price", "final_price", "amount",
-        "offer/price", "offer/Price", "offer/amount",
+        "g:sale_price", "g:price",              # Google Merchant
+        "PRICE_VAT", "Price", "price",          # Heureka/Compari/etc.
+        "price_with_vat",                       # Skroutz
+        "@price",                               # Ceneo-style attribute
     ]
 
     for p in paths + fallback_paths:
-        txt = _first(elem, [p])  # assuming you already have _first(elem, paths)
+        txt = _first(elem, [p])
         if txt:
             return txt
 
-    # Attribute-style (rare but seen): <price amount="123.45" currency="CZK"/>
-    node = _first_node(elem, paths + fallback_paths) if "_first_node" in globals() else None
+    # Attribute-style composite nodes, e.g. <price amount="123.45" currency="CZK"/>
+    node = _first_node(elem, paths + fallback_paths)
     if node is not None:
         a = (node.get("amount") or "").strip()
         c = (node.get("currency") or "").strip()
@@ -60,92 +128,15 @@ def read_price(elem: ET.Element, spec_name: str) -> tuple[float | None, str | No
     """
     raw = read_price_text(elem, spec_name)
     amt, cur = parse_price_text(raw)
+
     # SPEC-level override for separate currency nodes if needed
     spec = SPEC.get(spec_name, {})
-    cur_paths: list[str] = spec.get("currency_paths", [])
+    cur_paths: List[str] = spec.get("currency_paths", [])
     if not cur and cur_paths:
         cur_raw = _first(elem, cur_paths)
         if cur_raw:
             cur = _normalize_currency(cur_raw)
     return amt, cur, raw
-
-# ---------- PRICE HELPERS (generic) ----------
-_CURRENCY_ALIASES = {
-    "kč": "CZK", "czk": "CZK",
-    "zł": "PLN", "pln": "PLN",
-    "ft": "HUF", "huf": "HUF",
-    "lei": "RON", "ron": "RON",
-    "лв": "BGN", "bgn": "BGN",
-    "rsd": "RSD",
-    "bam": "BAM",
-    "eur": "EUR", "€": "EUR",
-    "usd": "USD", "$": "USD",
-    "gbp": "GBP", "£": "GBP",
-    "hrk": "HRK",  # legacy HR
-    "rsd": "RSD",
-    "ron": "RON",
-    "rsd": "RSD",
-    "lei": "RON",
-}
-
-_price_num_re = re.compile(r"[-+]?\d{1,3}(?:[ .,\u00A0]?\d{3})*(?:[.,]\d{1,2})?")  # finds "1 234,50" / "1,234.50" / "1234"
-
-def _normalize_amount(txt: str) -> float | None:
-    """Extract first numeric-like token and normalize to float."""
-    if not txt:
-        return None
-    m = _price_num_re.search(txt)
-    if not m:
-        return None
-    raw = m.group(0)
-    # Heuristics:
-    #  - if both '.' and ',' appear, assume thousands sep + decimal separator per common EU patterns
-    #  - else if only ',' and it appears once and after last 3 digits -> decimal
-    #  - else strip spaces/nbspaces/dots/commas appropriately
-    s = raw.replace("\u00A0", " ").strip()
-    # Remove spaces as thousand sep
-    s = s.replace(" ", "")
-    if "," in s and "." in s:
-        # Pick last symbol as decimal; drop the other as thousands
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "")
-            s = s.replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    else:
-        # Only one of them or none
-        if s.count(",") == 1 and s.rfind(",") >= len(s) - 3:
-            s = s.replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    try:
-        val = float(s)
-    except Exception:
-        return None
-    return val
-
-def _normalize_currency(txt: str) -> str | None:
-    if not txt:
-        return None
-    t = txt.strip().lower()
-    # Try to find a 3-letter code or common symbols/aliases anywhere around the price
-    # We check tokens and the whole string.
-    for alias, code in _CURRENCY_ALIASES.items():
-        if alias in t:
-            return code
-    # Try strict 3-letter currency codes
-    m = re.search(r"\b([A-Z]{3})\b", txt.upper())
-    if m:
-        return m.group(1)
-    return None
-
-def parse_price_text(raw_text: str) -> tuple[float | None, str | None]:
-    """Return (amount, currency) parsed from raw text like '1 234,50 CZK' or 'EUR 99.90'."""
-    if not raw_text:
-        return None, None
-    amt = _normalize_amount(raw_text)
-    cur = _normalize_currency(raw_text)
-    return amt, cur
 
 def _looks_like_google_without_ns(root: ET.Element) -> bool:
     try:
@@ -215,6 +206,25 @@ def _select_value(elem: ET.Element, path: str) -> str:
     n = elem.find(path, namespaces=NS)
     return (n.text or "").strip() if n is not None and n.text else ""
 
+def _first_node(elem: ET.Element, paths: List[str]) -> ET.Element | None:
+    """
+    Return the first matching node for any of the given paths (ignoring '/@attr' tail if present).
+    """
+    for p in paths:
+        p = p.strip()
+        if not p:
+            continue
+        node_path = p
+        if p.startswith("@"):
+            # attribute on current node → the node is elem itself
+            return elem
+        if "/@" in p:
+            node_path, _ = p.rsplit("/@", 1)
+        n = elem.find(node_path, namespaces=NS)
+        if n is not None:
+            return n
+    return None
+
 def _first(elem: ET.Element, paths: List[str]) -> str:
     for p in paths:
         t = _select_value(elem, p)
@@ -260,6 +270,10 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "id_paths": ["./{http://base.google.com/ns/1.0}id", "./g:id"],
         "link_paths": ["./link", "./{http://base.google.com/ns/1.0}link", "./g:link"],
         "image_primary_paths": ["./{http://base.google.com/ns/1.0}image_link", "./g:image_link"],
+        "price_paths": [  # <-- NEW
+            "./{http://base.google.com/ns/1.0}sale_price", "./g:sale_price",
+            "./{http://base.google.com/ns/1.0}price", "./g:price",
+        ],
         "required_fields": ["title", "description", "link", "image_link"],
         "availability_paths": ["./{http://base.google.com/ns/1.0}availability", "./g:availability"],
         "availability_aliases": ["availability"],
@@ -270,22 +284,25 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "expected_root_locals": ["rss"],
         "required_ns_fragments": ["base.google.com/ns/1.0"],
     },
-    
+
     "Google Merchant (g:) Atom": {
         "item_paths": [".//{http://www.w3.org/2005/Atom}entry", ".//entry"],
         "id_paths": ["./{http://base.google.com/ns/1.0}id", "./g:id"],
-        # ⬇️ Replace your current link_paths with this list
         "link_paths": [
-            "./atom:link[@rel='alternate']/@href",     # preferred Atom form
-            "./atom:link/@href",                       # any Atom link with href
+            "./atom:link[@rel='alternate']/@href",
+            "./atom:link/@href",
             "./{http://www.w3.org/2005/Atom}link/@href",
-            "./atom:link",                             # (less common) text inside <link>...</link>
+            "./atom:link",
             "./{http://www.w3.org/2005/Atom}link",
-            "./link",                                  # bad feeds that drop the ns
-            "./g:link",                                # very rare, but harmless fallback
+            "./link",
+            "./g:link",
             "./{http://base.google.com/ns/1.0}link",
         ],
         "image_primary_paths": ["./{http://base.google.com/ns/1.0}image_link", "./g:image_link"],
+        "price_paths": [  # <-- NEW
+            "./{http://base.google.com/ns/1.0}sale_price", "./g:sale_price",
+            "./{http://base.google.com/ns/1.0}price", "./g:price",
+        ],
         "required_fields": ["id", "link", "image_link"],
         "availability_paths": ["./{http://base.google.com/ns/1.0}availability", "./g:availability"],
         "availability_aliases": ["availability"],
@@ -298,32 +315,29 @@ SPEC: Dict[str, Dict[str, Any]] = {
     },
 
     "Google Merchant (no-namespace) RSS": {
-    "item_paths": [".//item"],
-    "id_paths": ["./id"],
-    "link_paths": ["./link"],
-    "image_primary_paths": ["./image_link"],
-    "required_fields": ["title", "description", "link", "image_link"],
-    "availability_paths": ["./availability"],
-    "availability_aliases": ["availability"],
-    "signature_tags": [
-        "title","description","link","id","image_link","price","availability",
-        "brand","mpn","gtin","condition","google_product_category","product_type","shipping"
-    ],
-    "expected_root_locals": ["rss"],
-    # helps GUI show a hint
-    "required_ns_fragments": [],  # intentionally empty (no g:)
+        "item_paths": [".//item"],
+        "id_paths": ["./id"],
+        "link_paths": ["./link"],
+        "image_primary_paths": ["./image_link"],
+        "price_paths": ["./sale_price", "./price"],  # <-- NEW
+        "required_fields": ["title", "description", "link", "image_link"],
+        "availability_paths": ["./availability"],
+        "availability_aliases": ["availability"],
+        "signature_tags": [
+            "title","description","link","id","image_link","price","availability",
+            "brand","mpn","gtin","condition","google_product_category","product_type","shipping"
+        ],
+        "expected_root_locals": ["rss"],
+        "required_ns_fragments": [],
     },
-    
+
     "Heureka strict": {
-        "item_paths": [".//SHOPITEM", ".//shopitem", ".//ShopItem"],  # support case variants
-        # IDs: prefer ITEM_ID, but accept lowercase or (rare) ITEMGROUP_ID as fallback
+        "item_paths": [".//SHOPITEM", ".//shopitem", ".//ShopItem"],
         "id_paths": ["./ITEM_ID", "./item_id", "./ItemId", "./ITEMGROUP_ID", "./itemgroup_id"],
-        # Links: accept URL/url
         "link_paths": ["./URL", "./Url", "./url"],
-        # Primary image: try IMGURL first; if missing, we’ll fall back to gallery below
         "image_primary_paths": ["./IMGURL", "./ImgUrl", "./imgurl"],
-        # Gallery: most Heureka feeds put extras in IMGURL_ALTERNATIVE repeating nodes
         "image_gallery_paths": ["./IMGURL_ALTERNATIVE", "./ImgUrl_Alternative", "./imgurl_alternative"],
+        "price_paths": ["./PRICE_VAT", "./price_vat"],  # <-- NEW
         "required_fields": ["ITEM_ID|item_id", "PRODUCTNAME|productname", "URL|url", "IMGURL|imgurl"],
         "availability_paths": [
             "./AVAILABILITY", "./availability",
@@ -337,15 +351,15 @@ SPEC: Dict[str, Dict[str, Any]] = {
             "manufacturer","categorytext","availability","delivery","delivery_time","delivery_date"
         ],
         "expected_root_locals": ["shop"],
-        # Special rule from your checker’s behavior: DELIVERY_DATE < 3 => “in stock”
         "special": {"heureka_delivery_date_to_availability": True},
     },
-    
+
     "Compari / Árukereső / Pazaruvaj (case-insensitive)": {
         "item_paths": [".//product"],
         "id_paths": ["./Identifier", "./identifier", "./ProductId", "./productid", "./id"],
         "link_paths": ["./Product_url", "./product_url"],
         "image_primary_paths": ["./Image_url", "./image_url"],
+        "price_paths": ["./Price", "./price"],  # <-- NEW
         "required_fields": ["identifier|productid", "name", "product_url", "price", "image_url", "category", "description"],
         "availability_paths": ["./availability", "./in_stock", "./stock", "./availability_status", "./Delivery_time"],
         "availability_aliases": ["availability", "in_stock", "stock", "availability_status", "Delivery_time"],
@@ -355,11 +369,13 @@ SPEC: Dict[str, Dict[str, Any]] = {
         ],
         "expected_root_locals": ["products"],
     },
+
     "Skroutz strict": {
         "item_paths": [".//product"],
         "id_paths": ["./id"],
         "link_paths": ["./link"],
         "image_primary_paths": ["./image"],
+        "price_paths": ["./price_with_vat"],  # <-- NEW
         "required_fields": ["id", "name", "link", "image", "price_with_vat"],
         "availability_paths": ["./availability", "./in_stock", "./stock"],
         "availability_aliases": ["availability", "in_stock", "stock"],
@@ -368,11 +384,13 @@ SPEC: Dict[str, Dict[str, Any]] = {
         ],
         "expected_root_locals": ["products"],
     },
+
     "Jeftinije / Ceneje strict": {
         "item_paths": [".//Item"],
         "id_paths": ["./ID", "./id"],
         "link_paths": ["./link"],
         "image_primary_paths": ["./mainImage", "./image"],
+        "price_paths": ["./price", "./Price"],  # <-- NEW
         "required_fields": ["id", "name", "link", "mainimage|image", "price"],
         "availability_paths": ["./availability", "./in_stock", "./stock"],
         "availability_aliases": ["availability", "in_stock", "stock"],
@@ -381,24 +399,22 @@ SPEC: Dict[str, Dict[str, Any]] = {
         ],
         "expected_root_locals": ["items","products","shop"],
     },
+
     "Ceneo strict": {
-    "item_paths": [".//o"],             # unchanged
-    # read from attributes on <o>
-    "id_paths": ["@id"],
-    "link_paths": ["@url"],
-    # keep element fallback if some feeds use child nodes
-    "image_primary_paths": ["./imgs/main/@url", "./image"],
-    # (optional) gallery if present as <imgs><img url="..."/>
-    "image_gallery_paths": ["./imgs/img/@url"],
-    "required_fields": ["name", "price", "cat", "url"],
-    # availability commonly in attribute 'avail' on <o>
-    "availability_paths": ["@avail", "@availability", "@stock"],
-    "availability_aliases": ["availability", "stock", "avail"],
-    "signature_tags": [
-        "id","name","price","cat","url","imgs","main","desc","avail","availability","stock"
-    ],
-    "expected_root_locals": ["offers"],
-},
+        "item_paths": [".//o"],
+        "id_paths": ["@id"],
+        "link_paths": ["@url"],
+        "image_primary_paths": ["./imgs/main/@url", "./image"],
+        "image_gallery_paths": ["./imgs/img/@url"],
+        "price_paths": ["@price", "./price"],  # <-- NEW (attribute first)
+        "required_fields": ["name", "price", "cat", "url"],
+        "availability_paths": ["@avail", "@availability", "@stock"],
+        "availability_aliases": ["availability", "stock", "avail"],
+        "signature_tags": [
+            "id","name","price","cat","url","imgs","main","desc","avail","availability","stock"
+        ],
+        "expected_root_locals": ["offers"],
+    },
 }
 
 # -------------------- Detection = mirror of your detectors --------------------
@@ -416,7 +432,7 @@ def detect_spec(root: ET.Element) -> str:
     if _exists(root, ".//item"):
         if b"base.google.com/ns/1.0" in root_xml:
             return "Google Merchant (g:) RSS"
-            
+
     # Google RSS (no g: namespace) — must come BEFORE marketplace checks
     if _looks_like_google_without_ns(root):
         return "Google Merchant (no-namespace) RSS"
@@ -433,7 +449,7 @@ def detect_spec(root: ET.Element) -> str:
     if _exists(root, ".//Item") or _exists_local(root, "item"):
         return "Jeftinije / Ceneje strict"
 
-    # Compari / Skroutz: look for <product> (case-insensitive). Skroutz has price_with_vat.
+    # Compari / Skroutz: look for <product>. Skroutz has price_with_vat.
     if _exists(root, ".//product") or _exists_local(root, "product"):
         sample = root.find(".//product", namespaces=NS) or _first_local(root, "product")
         if sample is not None and (sample.find("./price_with_vat", namespaces=NS) is not None or
@@ -459,10 +475,7 @@ def gather_primary_image(elem: ET.Element, spec_name: str, do_percent_encode: bo
 
 def gather_gallery(elem: ET.Element, spec_name: str, do_percent_encode: bool = True) -> List[str]:
     """
-    Your checker spec list doesn’t include explicit gallery paths,
-    so by default we return an empty list here. If you want to add
-    gallery support spec-by-spec, add an `"image_gallery_paths": [...]`
-    list to the SPEC entry, and we’ll read it.
+    Return gallery images if configured for the spec.
     """
     paths = SPEC.get(spec_name, {}).get("image_gallery_paths", [])
     out: List[str] = _all(elem, paths) if paths else []
