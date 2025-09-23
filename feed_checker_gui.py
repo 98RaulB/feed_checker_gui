@@ -553,7 +553,7 @@ for pid, idxs in dup_ids_map.items():
         "occurrences": len(unique_preserve([str(int(i)) for i in idxs])),
         "example_links": " | ".join(ex_links) if ex_links else ""
     })
-dup_id_rows.sort(key=lambda r: (-r["occurrences"], r["id"]])
+dup_id_rows.sort(key=lambda r: (-r["occurrences"], r["id"])
 show_issue_table("Duplicate IDs (grouped)", dup_id_rows, sample_show)
 
 # Duplicates (URLs)
