@@ -20,7 +20,7 @@ from feed_specs import (
     gather_primary_image,
     read_link_raw,                 # RAW (no percent-encoding) to warn on spaces/non-ASCII
     gather_primary_image_raw,      # RAW
-    read_price,                    # <-- NEW: (amount, currency, raw_text)
+    read_price,                    # (amount, currency, raw_text) — see feed_specs.py
 )
 
 # Safe XML parsing (defusedxml if present)
@@ -171,6 +171,70 @@ def iter_items_stream(file_like, wanted_localnames: Iterable[str]):
         top = sorted(seen_counts.items(), key=lambda x: -x[1])[:10]
         st.info("No items matched. Top end-tags seen: " + ", ".join(f"{k}×{v}" for k,v in top))
 
+# ---------- FAVI price-format validation ----------
+# Accepted by FAVI:
+#  - "8 000"         (space thousands)
+#  - "8000"          (plain integer)
+#  - "8000,70"       (comma decimals)
+#  - "8000.70"       (dot decimals; dot used ONLY as decimal separator)
+#
+# Not accepted:
+#  - "8.000" or "1.234,50" (dot as thousands)
+#  - "1,234.50"            (comma as thousands)
+#  - More than 2 decimals  → warn: over-precision (will be rounded)
+#
+_re_int_plain          = re.compile(r"^\d+$$")
+_re_int_space_groups   = re.compile(r"^\d{1,3}(?: \d{3})+$")
+_re_dec_comma          = re.compile(r"^\d+(?:,\d+)$")
+_re_dec_dot            = re.compile(r"^\d+(?:\.\d+)$")
+_re_has_dot_thousands  = re.compile(r"\d\.\d{3}(?:[^\d]|$)")
+_re_has_comma_thousands= re.compile(r"\d,\d{3}(?:[^\d]|$)")
+
+def _extract_first_numeric_token(s: str) -> str:
+    # capture the same token parse_price() would see, but keep punctuation to validate format
+    m = re.search(r"\d{1,3}(?:[ .,\u00A0]?\d{3})*(?:[.,]\d+)?|\d+(?:[.,]\d+)?", s)
+    return m.group(0) if m else ""
+
+def favi_price_format_flags(raw_text: str) -> Tuple[bool, bool, str]:
+    """
+    Returns (is_valid_format, has_overprecision, reason)
+    - is_valid_format: obeys FAVI allowed grouping/decimal rules
+    - has_overprecision: > 2 decimals (FAVI rounds; we warn)
+    - reason: explanation when invalid
+    """
+    if not raw_text:
+        return False, False, "missing"
+    token = _extract_first_numeric_token(raw_text.replace("\u00A0", " "))
+    if not token:
+        return False, False, "no numeric token"
+
+    # Disallow dot/comma as thousands separators
+    if _re_has_dot_thousands.search(token):
+        return False, False, "dot used as thousands separator"
+    if _re_has_comma_thousands.search(token):
+        return False, False, "comma used as thousands separator"
+
+    # Allowed overall shapes
+    allowed = (
+        _re_int_plain.match(token)
+        or _re_int_space_groups.match(token)
+        or _re_dec_comma.match(token)
+        or _re_dec_dot.match(token)
+    )
+    if not allowed:
+        return False, False, "format not in {8000 | 8 000 | 8000,dd | 8000.dd}"
+
+    # Over-precision (>2 decimals) → warn
+    overprecision = False
+    if "," in token:
+        dec = token.split(",", 1)[1]
+        overprecision = len(dec) > 2
+    elif "." in token:
+        dec = token.split(".", 1)[1]
+        overprecision = len(dec) > 2
+
+    return True, overprecision, ""
+
 # ---------- Form ----------
 with st.form("input"):
     url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
@@ -231,7 +295,7 @@ links: List[str] = []
 images: List[str] = []
 avails: List[str] = []
 
-# NEW: price buckets
+# PRICE buckets
 prices_amt: List[float | None] = []
 prices_cur: List[str | None] = []
 prices_raw: List[str] = []
@@ -241,10 +305,12 @@ missing_link_idx: List[int] = []
 missing_img_idx: List[int] = []
 missing_avail_idx: List[int] = []
 
-# NEW: price issue indexes
-missing_price_idx: List[int] = []
-bad_price_idx: List[int] = []          # present but unparseable or <= 0
-missing_currency_idx: List[int] = []   # best-effort warn
+# PRICE issue indexes (semantic + format)
+missing_price_idx: List[int] = []          # no price node/text
+bad_price_idx: List[int] = []              # present but unparseable or <= 0
+missing_currency_idx: List[int] = []       # best-effort warn
+invalid_price_format_idx: List[int] = []   # violates FAVI format rules
+overprecision_price_idx: List[int] = []    # > 2 decimals (FAVI rounds)
 
 raw_links: List[str] = []
 raw_imgs: List[str] = []
@@ -266,9 +332,9 @@ def process_item(elem, index: int, spec: str):
     purl_raw = (read_link_raw(elem, spec) or "").strip()
     pimg_raw = (gather_primary_image_raw(elem, spec) or "").strip()
 
-    # NEW: price read
+    # PRICE read
     try:
-        amt, cur, raw_price = read_price(elem, spec)
+        amt, cur, raw_price = read_price(elem, spec)  # from feed_specs.py
     except Exception:
         amt, cur, raw_price = None, None, ""
 
@@ -284,7 +350,7 @@ def process_item(elem, index: int, spec: str):
     if not pimg: missing_img_idx.append(index)
     if not pav:  missing_avail_idx.append(index)
 
-    # Price validations
+    # PRICE validations (semantic)
     if (raw_price or "").strip() == "":
         missing_price_idx.append(index)
     else:
@@ -292,6 +358,13 @@ def process_item(elem, index: int, spec: str):
             bad_price_idx.append(index)
         if cur is None:
             missing_currency_idx.append(index)
+
+        # PRICE validations (FAVI format rules)
+        valid_fmt, overprec, reason = favi_price_format_flags(raw_price or "")
+        if not valid_fmt:
+            invalid_price_format_idx.append(index)
+        if overprec:
+            overprecision_price_idx.append(index)
 
     # URL quality warnings from RAW
     if purl_raw and ((" " in purl_raw) or not ascii_only.match(purl_raw)):
@@ -312,7 +385,7 @@ def process_item(elem, index: int, spec: str):
         else:
             link_first_seen[purl] = index
 
-# ---------- DOM path (Auto + small, non-gz, and only if NOT sample mode) ----------
+# ---------- DOM path ----------
 def run_dom_path() -> bool:
     global xml_ok, spec_name, total_items, processed_items
     try:
@@ -341,7 +414,7 @@ def run_dom_path() -> bool:
         st.warning(f"DOM path failed ({e}). Falling back to streaming.")
         return False
 
-# ---------- Streaming path (Auto-large, any .gz, or Sample mode) ----------
+# ---------- Streaming path ----------
 def run_stream_path(limit: int | None):
     global xml_ok, spec_name, total_items, processed_items
     try:
@@ -357,10 +430,8 @@ def run_stream_path(limit: int | None):
         if spec_name and spec_name.upper() != "UNKNOWN":
             item_tags = localnames_from_item_paths(spec_name)
             if not item_tags:
-                # Extreme fallback if SPEC had no paths (unlikely)
                 item_tags = {"item", "entry", "offer"}
         else:
-            # Unknown feeds → generous fallback
             item_tags = {"item", "entry", "offer", "product"}
 
         st.caption("Looking for item tags: " + ", ".join(sorted(list(item_tags))))
@@ -436,9 +507,11 @@ with c5:
         + len(missing_avail_idx)
         + len(bad_url_idx)
         + len(bad_img_idx)
-        + len(missing_price_idx)     # NEW
-        + len(bad_price_idx)         # NEW
-        + len(missing_currency_idx)  # NEW (warn)
+        + len(missing_price_idx)
+        + len(bad_price_idx)
+        + len(missing_currency_idx)
+        + len(invalid_price_format_idx)
+        + len(overprecision_price_idx)
     )
     any_warnings = total_warnings > 0
     status_pill(f"Warnings: {total_warnings}", "#f59e0b" if any_warnings else "#16a34a")
@@ -456,10 +529,16 @@ pass_fail["Availability present"] = (True, len(missing_avail_idx) > 0, f"(missin
 pass_fail["Product URL validity"] = (True, len(bad_url_idx) > 0, f"(bad: {len(bad_url_idx)})")
 pass_fail["Image URL validity"] = (True, len(bad_img_idx) > 0, f"(bad: {len(bad_img_idx)})")
 
-# NEW: Price summary lines
+# PRICE summary lines
 pass_fail["Price present"] = (len(missing_price_idx) == 0, False, f"(missing: {len(missing_price_idx)})")
 pass_fail["Price numeric > 0"] = (len(bad_price_idx) == 0, False, f"(invalid: {len(bad_price_idx)})")
-pass_fail["Currency detected (best-effort)"] = (True, len(missing_currency_idx) > 0, f"(missing: {len(missing_currency_idx)})")
+# FAVI format rules: treat as WARNs so shops see why (you can flip to FAIL if desired)
+pass_fail["Price format follows FAVI rules"] = (True, len(invalid_price_format_idx) > 0,
+                                               f"(invalid format: {len(invalid_price_format_idx)})")
+pass_fail["Price precision (<= 2 decimals)"] = (True, len(overprecision_price_idx) > 0,
+                                               f"(over-precision: {len(overprecision_price_idx)})")
+pass_fail["Currency detected (best-effort)"] = (True, len(missing_currency_idx) > 0,
+                                               f"(missing: {len(missing_currency_idx)})")
 
 st.markdown("---")
 summarize(pass_fail)
@@ -499,7 +578,7 @@ missing_avail_rows = [
 ]
 show_issue_table("Missing Availability (by product ID)", missing_avail_rows, sample_show)
 
-# NEW: Price detail tables
+# PRICE details
 missing_price_rows = [
     {"id": safe_get(ids, i) or "(missing id)", "link": safe_get(links, i), "raw_price": "(missing)"}
     for i in missing_price_idx if safe_get(ids, i)
@@ -516,6 +595,24 @@ bad_price_rows = [
     for i in bad_price_idx
 ]
 show_issue_table("Invalid Price (non-numeric or <= 0) — by product ID", bad_price_rows, sample_show)
+
+invalid_format_rows = [
+    {"id": safe_get(ids, i) or "(missing id)",
+     "link": safe_get(links, i),
+     "raw_price": safe_get(prices_raw, i) or "(missing)",
+     "note": "Format not allowed by FAVI (dot-as-thousands/comma-as-thousands/etc.)"}
+    for i in invalid_price_format_idx
+]
+show_issue_table("Price format violations (FAVI rules)", invalid_format_rows, sample_show)
+
+overprecision_rows = [
+    {"id": safe_get(ids, i) or "(missing id)",
+     "link": safe_get(links, i),
+     "raw_price": safe_get(prices_raw, i) or "(missing)",
+     "note": "More than 2 decimals — FAVI rounds automatically"}
+    for i in overprecision_price_idx
+]
+show_issue_table("Price over-precision (> 2 decimals) — informational", overprecision_rows, sample_show)
 
 missing_currency_rows = [
     {"id": safe_get(ids, i) or "(missing id)",
@@ -553,7 +650,7 @@ for pid, idxs in dup_ids_map.items():
         "occurrences": len(unique_preserve([str(int(i)) for i in idxs])),
         "example_links": " | ".join(ex_links) if ex_links else ""
     })
-dup_id_rows.sort(key=lambda r: (-r["occurrences"], r["id"])
+dup_id_rows.sort(key=lambda r: (-r["occurrences"], r["id"]))
 show_issue_table("Duplicate IDs (grouped)", dup_id_rows, sample_show)
 
 # Duplicates (URLs)
@@ -572,7 +669,7 @@ for url, idlist in url_to_ids.items():
         "num_ids": len(ids_u),
         "ids": ", ".join(ids_u[:12]) + (" …" if len(ids_u) > 12 else "")
     })
-dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"])
+dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"]))
 show_issue_table("Duplicate Product URLs (grouped, with IDs)", dup_url_rows, sample_show)
 
 st.markdown("---")
@@ -581,4 +678,5 @@ st.caption(
      f"Scope: Auto (parser: {'Streaming' if (is_gzip_path(src_path) or file_size>SMALL_SIZE_LIMIT) else 'DOM'})")
 )
 st.markdown("© 2025 Raul Bertoldini")
+
 
