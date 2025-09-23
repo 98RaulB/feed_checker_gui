@@ -20,7 +20,7 @@ from feed_specs import (
     gather_primary_image,
     read_link_raw,                 # RAW (no percent-encoding) to warn on spaces/non-ASCII
     gather_primary_image_raw,      # RAW
-    read_price,                    # (amount, currency, raw_text) — see feed_specs.py
+    read_price,                    # (amount, raw_text)
 )
 
 # Safe XML parsing (defusedxml if present)
@@ -182,13 +182,12 @@ def iter_items_stream(file_like, wanted_localnames: Iterable[str]):
 #  - "8.000" or "1.234,50" (dot as thousands)
 #  - "1,234.50"            (comma as thousands)
 #  - More than 2 decimals  → warn: over-precision (will be rounded)
-#
-_re_int_plain          = re.compile(r"^\d+$$")
-_re_int_space_groups   = re.compile(r"^\d{1,3}(?: \d{3})+$")
-_re_dec_comma          = re.compile(r"^\d+(?:,\d+)$")
-_re_dec_dot            = re.compile(r"^\d+(?:\.\d+)$")
-_re_has_dot_thousands  = re.compile(r"\d\.\d{3}(?:[^\d]|$)")
-_re_has_comma_thousands= re.compile(r"\d,\d{3}(?:[^\d]|$)")
+_re_int_plain           = re.compile(r"^\d+$")
+_re_int_space_groups    = re.compile(r"^\d{1,3}(?: \d{3})+$")
+_re_dec_comma           = re.compile(r"^\d+(?:,\d+)$")
+_re_dec_dot             = re.compile(r"^\d+(?:\.\d+)$")
+_re_has_dot_thousands   = re.compile(r"\d\.\d{3}(?:[^\d]|$)")
+_re_has_comma_thousands = re.compile(r"\d,\d{3}(?:[^\d]|$)")
 
 def _extract_first_numeric_token(s: str) -> str:
     # capture the same token parse_price() would see, but keep punctuation to validate format
@@ -261,7 +260,7 @@ if not submitted:
 
 # 1) Get a file on disk
 if url.strip():
-    if not url.lower().startswith(("http://", "https://")):  # guard
+    if not url.lower().startsWith(("http://", "https://")):  # guard
         st.error("URL must start with http:// or https://"); st.stop()
     try:
         src_path = download_to_tmp(url.strip())
@@ -297,7 +296,6 @@ avails: List[str] = []
 
 # PRICE buckets
 prices_amt: List[float | None] = []
-prices_cur: List[str | None] = []
 prices_raw: List[str] = []
 
 missing_id_idx: List[int] = []
@@ -308,7 +306,6 @@ missing_avail_idx: List[int] = []
 # PRICE issue indexes (semantic + format)
 missing_price_idx: List[int] = []          # no price node/text
 bad_price_idx: List[int] = []              # present but unparseable or <= 0
-missing_currency_idx: List[int] = []       # best-effort warn
 invalid_price_format_idx: List[int] = []   # violates FAVI format rules
 overprecision_price_idx: List[int] = []    # > 2 decimals (FAVI rounds)
 
@@ -334,15 +331,14 @@ def process_item(elem, index: int, spec: str):
 
     # PRICE read
     try:
-        amt, cur, raw_price = read_price(elem, spec)  # from feed_specs.py
+        amt, raw_price = read_price(elem, spec)  # from feed_specs.py
     except Exception:
-        amt, cur, raw_price = None, None, ""
+        amt, raw_price = None, ""
 
     ids.append(pid); links.append(purl); images.append(pimg); avails.append(pav)
     raw_links.append(purl_raw); raw_imgs.append(pimg_raw)
 
     prices_amt.append(amt)
-    prices_cur.append(cur)
     prices_raw.append(raw_price or "")
 
     if not pid: missing_id_idx.append(index)
@@ -356,11 +352,9 @@ def process_item(elem, index: int, spec: str):
     else:
         if (amt is None) or (amt is not None and amt <= 0):
             bad_price_idx.append(index)
-        if cur is None:
-            missing_currency_idx.append(index)
 
         # PRICE validations (FAVI format rules)
-        valid_fmt, overprec, reason = favi_price_format_flags(raw_price or "")
+        valid_fmt, overprec, _reason = favi_price_format_flags(raw_price or "")
         if not valid_fmt:
             invalid_price_format_idx.append(index)
         if overprec:
@@ -385,7 +379,7 @@ def process_item(elem, index: int, spec: str):
         else:
             link_first_seen[purl] = index
 
-# ---------- DOM path ----------
+# ---------- DOM path (Auto + small, non-gz, and only if NOT sample mode) ----------
 def run_dom_path() -> bool:
     global xml_ok, spec_name, total_items, processed_items
     try:
@@ -414,7 +408,7 @@ def run_dom_path() -> bool:
         st.warning(f"DOM path failed ({e}). Falling back to streaming.")
         return False
 
-# ---------- Streaming path ----------
+# ---------- Streaming path (Auto-large, any .gz, or Sample mode) ----------
 def run_stream_path(limit: int | None):
     global xml_ok, spec_name, total_items, processed_items
     try:
@@ -509,7 +503,6 @@ with c5:
         + len(bad_img_idx)
         + len(missing_price_idx)
         + len(bad_price_idx)
-        + len(missing_currency_idx)
         + len(invalid_price_format_idx)
         + len(overprecision_price_idx)
     )
@@ -537,8 +530,6 @@ pass_fail["Price format follows FAVI rules"] = (True, len(invalid_price_format_i
                                                f"(invalid format: {len(invalid_price_format_idx)})")
 pass_fail["Price precision (<= 2 decimals)"] = (True, len(overprecision_price_idx) > 0,
                                                f"(over-precision: {len(overprecision_price_idx)})")
-pass_fail["Currency detected (best-effort)"] = (True, len(missing_currency_idx) > 0,
-                                               f"(missing: {len(missing_currency_idx)})")
 
 st.markdown("---")
 summarize(pass_fail)
@@ -590,7 +581,6 @@ bad_price_rows = [
      "link": safe_get(links, i),
      "raw_price": safe_get(prices_raw, i) or "(missing)",
      "parsed_amount": safe_get(prices_amt, i),
-     "currency": safe_get(prices_cur, i) or "(unknown)",
     }
     for i in bad_price_idx
 ]
@@ -613,15 +603,6 @@ overprecision_rows = [
     for i in overprecision_price_idx
 ]
 show_issue_table("Price over-precision (> 2 decimals) — informational", overprecision_rows, sample_show)
-
-missing_currency_rows = [
-    {"id": safe_get(ids, i) or "(missing id)",
-     "link": safe_get(links, i),
-     "raw_price": safe_get(prices_raw, i) or "(missing)",
-    }
-    for i in missing_currency_idx if i not in missing_price_idx
-]
-show_issue_table("Price without detectable currency (FYI)", missing_currency_rows, sample_show)
 
 # Bad URL warnings (RAW)
 bad_url_rows = [
@@ -678,5 +659,3 @@ st.caption(
      f"Scope: Auto (parser: {'Streaming' if (is_gzip_path(src_path) or file_size>SMALL_SIZE_LIMIT) else 'DOM'})")
 )
 st.markdown("© 2025 Raul Bertoldini")
-
-
