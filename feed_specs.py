@@ -1,7 +1,7 @@
 # feed_specs.py
 from __future__ import annotations
 from typing import Dict, List, Tuple, Any
-import re  # <-- needed for price parsing
+import re  # needed for price parsing
 
 # Safe XML parsing
 try:
@@ -24,23 +24,11 @@ def strip_ns(tag: str) -> str:
 def read_link_raw(elem: ET.Element, spec_name: str) -> str:
     return _first(elem, SPEC.get(spec_name, {}).get("link_paths", []))
 
-# ---------- PRICE HELPERS (generic) ----------
-_CURRENCY_ALIASES = {
-    "kč": "CZK", "czk": "CZK",
-    "zł": "PLN", "pln": "PLN",
-    "ft": "HUF", "huf": "HUF",
-    "lei": "RON", "ron": "RON",
-    "лв": "BGN", "bgn": "BGN",
-    "rsd": "RSD",
-    "bam": "BAM",
-    "eur": "EUR", "€": "EUR",
-    "usd": "USD", "$": "USD",
-    "gbp": "GBP", "£": "GBP",
-    "hrk": "HRK",  # legacy HR
-}
-
-# finds "1 234,50" / "1,234.50" / "1234" / "1234.9" / "1234,9"
-_price_num_re = re.compile(r"[-+]?\d{1,3}(?:[ .,\u00A0]?\d{3})*(?:[.,]\d+)?|[-+]?\d+(?:[.,]\d+)?")
+# ---------- PRICE HELPERS (no currency) ----------
+# Finds "1 234,50" / "1234.50" / "1234" / "1,234.50" etc.
+_price_num_re = re.compile(
+    r"[-+]?\d{1,3}(?:[ .,\u00A0]?\d{3})*(?:[.,]\d+)?|[-+]?\d+(?:[.,]\d+)?"
+)
 
 def _normalize_amount(txt: str) -> float | None:
     """Extract first numeric-like token and normalize to float."""
@@ -71,25 +59,11 @@ def _normalize_amount(txt: str) -> float | None:
     except Exception:
         return None
 
-def _normalize_currency(txt: str) -> str | None:
-    if not txt:
-        return None
-    t = txt.strip().lower()
-    for alias, code in _CURRENCY_ALIASES.items():
-        if alias in t:
-            return code
-    m = re.search(r"\b([A-Z]{3})\b", txt.upper())
-    if m:
-        return m.group(1)
-    return None
-
-def parse_price_text(raw_text: str) -> tuple[float | None, str | None]:
-    """Return (amount, currency) parsed from raw text like '1 234,50 CZK' or 'EUR 99.90'."""
+def parse_price_text(raw_text: str) -> float | None:
+    """Return amount parsed from raw text like '1 234,50'."""
     if not raw_text:
-        return None, None
-    amt = _normalize_amount(raw_text)
-    cur = _normalize_currency(raw_text)
-    return amt, cur
+        return None
+    return _normalize_amount(raw_text)
 
 def read_price_text(elem: ET.Element, spec_name: str) -> str:
     """
@@ -101,10 +75,10 @@ def read_price_text(elem: ET.Element, spec_name: str) -> str:
 
     # Fallbacks (cover broad ecosystems; SPEC paths take precedence)
     fallback_paths = [
-        "g:sale_price", "g:price",              # Google Merchant
-        "PRICE_VAT", "Price", "price",          # Heureka/Compari/etc.
-        "price_with_vat",                       # Skroutz
-        "@price",                               # Ceneo-style attribute
+        "g:sale_price", "g:price",        # Google Merchant
+        "PRICE_VAT", "Price", "price",    # Heureka/Compari/etc.
+        "price_with_vat",                 # Skroutz
+        "@price",                         # Ceneo-style attribute
     ]
 
     for p in paths + fallback_paths:
@@ -112,31 +86,22 @@ def read_price_text(elem: ET.Element, spec_name: str) -> str:
         if txt:
             return txt
 
-    # Attribute-style composite nodes, e.g. <price amount="123.45" currency="CZK"/>
+    # Attribute-style composite nodes, e.g. <price amount="123.45" .../>
     node = _first_node(elem, paths + fallback_paths)
     if node is not None:
         a = (node.get("amount") or "").strip()
-        c = (node.get("currency") or "").strip()
-        if a or c:
-            return f"{a} {c}".strip()
+        if a:
+            return a
     return ""
 
-def read_price(elem: ET.Element, spec_name: str) -> tuple[float | None, str | None, str]:
+def read_price(elem: ET.Element, spec_name: str) -> tuple[float | None, str]:
     """
-    Unified reader returning (amount, currency, raw_text).
-    Amount is float (None if unparseable), currency is ISO-like or None if unknown.
+    Unified price reader for GUI:
+      returns (amount_float_or_None, raw_text_as_found)
     """
     raw = read_price_text(elem, spec_name)
-    amt, cur = parse_price_text(raw)
-
-    # SPEC-level override for separate currency nodes if needed
-    spec = SPEC.get(spec_name, {})
-    cur_paths: List[str] = spec.get("currency_paths", [])
-    if not cur and cur_paths:
-        cur_raw = _first(elem, cur_paths)
-        if cur_raw:
-            cur = _normalize_currency(cur_raw)
-    return amt, cur, raw
+    amt = parse_price_text(raw)
+    return amt, raw
 
 def _looks_like_google_without_ns(root: ET.Element) -> bool:
     try:
@@ -263,14 +228,14 @@ def percent_encode_url(url: str) -> str:
     frag  = quote(parts.fragment or "", safe="-._~")
     return urlunsplit((parts.scheme, parts.netloc, path, query, frag))
 
-# -------------------- EXACT mirror of your checker SPECS --------------------
+# -------------------- SPEC definitions --------------------
 SPEC: Dict[str, Dict[str, Any]] = {
     "Google Merchant (g:) RSS": {
         "item_paths": [".//item"],
         "id_paths": ["./{http://base.google.com/ns/1.0}id", "./g:id"],
         "link_paths": ["./link", "./{http://base.google.com/ns/1.0}link", "./g:link"],
         "image_primary_paths": ["./{http://base.google.com/ns/1.0}image_link", "./g:image_link"],
-        "price_paths": [  # <-- NEW
+        "price_paths": [
             "./{http://base.google.com/ns/1.0}sale_price", "./g:sale_price",
             "./{http://base.google.com/ns/1.0}price", "./g:price",
         ],
@@ -299,7 +264,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
             "./{http://base.google.com/ns/1.0}link",
         ],
         "image_primary_paths": ["./{http://base.google.com/ns/1.0}image_link", "./g:image_link"],
-        "price_paths": [  # <-- NEW
+        "price_paths": [
             "./{http://base.google.com/ns/1.0}sale_price", "./g:sale_price",
             "./{http://base.google.com/ns/1.0}price", "./g:price",
         ],
@@ -319,7 +284,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "id_paths": ["./id"],
         "link_paths": ["./link"],
         "image_primary_paths": ["./image_link"],
-        "price_paths": ["./sale_price", "./price"],  # <-- NEW
+        "price_paths": ["./sale_price", "./price"],
         "required_fields": ["title", "description", "link", "image_link"],
         "availability_paths": ["./availability"],
         "availability_aliases": ["availability"],
@@ -337,7 +302,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "link_paths": ["./URL", "./Url", "./url"],
         "image_primary_paths": ["./IMGURL", "./ImgUrl", "./imgurl"],
         "image_gallery_paths": ["./IMGURL_ALTERNATIVE", "./ImgUrl_Alternative", "./imgurl_alternative"],
-        "price_paths": ["./PRICE_VAT", "./price_vat"],  # <-- NEW
+        "price_paths": ["./PRICE_VAT", "./price_vat"],
         "required_fields": ["ITEM_ID|item_id", "PRODUCTNAME|productname", "URL|url", "IMGURL|imgurl"],
         "availability_paths": [
             "./AVAILABILITY", "./availability",
@@ -359,7 +324,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "id_paths": ["./Identifier", "./identifier", "./ProductId", "./productid", "./id"],
         "link_paths": ["./Product_url", "./product_url"],
         "image_primary_paths": ["./Image_url", "./image_url"],
-        "price_paths": ["./Price", "./price"],  # <-- NEW
+        "price_paths": ["./Price", "./price"],
         "required_fields": ["identifier|productid", "name", "product_url", "price", "image_url", "category", "description"],
         "availability_paths": ["./availability", "./in_stock", "./stock", "./availability_status", "./Delivery_time"],
         "availability_aliases": ["availability", "in_stock", "stock", "availability_status", "Delivery_time"],
@@ -375,7 +340,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "id_paths": ["./id"],
         "link_paths": ["./link"],
         "image_primary_paths": ["./image"],
-        "price_paths": ["./price_with_vat"],  # <-- NEW
+        "price_paths": ["./price_with_vat"],
         "required_fields": ["id", "name", "link", "image", "price_with_vat"],
         "availability_paths": ["./availability", "./in_stock", "./stock"],
         "availability_aliases": ["availability", "in_stock", "stock"],
@@ -390,7 +355,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "id_paths": ["./ID", "./id"],
         "link_paths": ["./link"],
         "image_primary_paths": ["./mainImage", "./image"],
-        "price_paths": ["./price", "./Price"],  # <-- NEW
+        "price_paths": ["./price", "./Price"],
         "required_fields": ["id", "name", "link", "mainimage|image", "price"],
         "availability_paths": ["./availability", "./in_stock", "./stock"],
         "availability_aliases": ["availability", "in_stock", "stock"],
@@ -406,7 +371,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "link_paths": ["@url"],
         "image_primary_paths": ["./imgs/main/@url", "./image"],
         "image_gallery_paths": ["./imgs/img/@url"],
-        "price_paths": ["@price", "./price"],  # <-- NEW (attribute first)
+        "price_paths": ["@price", "./price"],  # attribute first
         "required_fields": ["name", "price", "cat", "url"],
         "availability_paths": ["@avail", "@availability", "@stock"],
         "availability_aliases": ["availability", "stock", "avail"],
@@ -417,7 +382,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# -------------------- Detection = mirror of your detectors --------------------
+# -------------------- Detection --------------------
 def _exists(root, xpath: str) -> bool:
     return root.find(xpath, namespaces=NS) is not None
 
