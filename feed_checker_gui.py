@@ -1,5 +1,4 @@
  # feed_checker_gui.py
- from __future__ import annotations
  from typing import List, Tuple, Dict, Any, Iterable
  import re
  from collections import defaultdict
