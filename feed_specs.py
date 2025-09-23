@@ -23,6 +23,130 @@ def strip_ns(tag: str) -> str:
 def read_link_raw(elem: ET.Element, spec_name: str) -> str:
     return _first(elem, SPEC.get(spec_name, {}).get("link_paths", []))
 
+def read_price_text(elem: ET.Element, spec_name: str) -> str:
+    """
+    Return the raw textual price as found in the element, with spec-specific paths first,
+    then generic fallbacks. Does NOT normalize; use parse_price_text() for that.
+    """
+    spec = SPEC.get(spec_name, {})
+    paths: list[str] = spec.get("price_paths", [])
+
+    # Sensible defaults if spec didn't define anything
+    fallback_paths = [
+        "g:price", "g:sale_price",          # Google Merchant
+        "price", "PRICE", "Price",
+        "min_price", "final_price", "amount",
+        "offer/price", "offer/Price", "offer/amount",
+    ]
+
+    for p in paths + fallback_paths:
+        txt = _first(elem, [p])  # assuming you already have _first(elem, paths)
+        if txt:
+            return txt
+
+    # Attribute-style (rare but seen): <price amount="123.45" currency="CZK"/>
+    node = _first_node(elem, paths + fallback_paths) if "_first_node" in globals() else None
+    if node is not None:
+        a = (node.get("amount") or "").strip()
+        c = (node.get("currency") or "").strip()
+        if a or c:
+            return f"{a} {c}".strip()
+    return ""
+
+def read_price(elem: ET.Element, spec_name: str) -> tuple[float | None, str | None, str]:
+    """
+    Unified reader returning (amount, currency, raw_text).
+    Amount is float (None if unparseable), currency is ISO-like or None if unknown.
+    """
+    raw = read_price_text(elem, spec_name)
+    amt, cur = parse_price_text(raw)
+    # SPEC-level override for separate currency nodes if needed
+    spec = SPEC.get(spec_name, {})
+    cur_paths: list[str] = spec.get("currency_paths", [])
+    if not cur and cur_paths:
+        cur_raw = _first(elem, cur_paths)
+        if cur_raw:
+            cur = _normalize_currency(cur_raw)
+    return amt, cur, raw
+
+# ---------- PRICE HELPERS (generic) ----------
+_CURRENCY_ALIASES = {
+    "kč": "CZK", "czk": "CZK",
+    "zł": "PLN", "pln": "PLN",
+    "ft": "HUF", "huf": "HUF",
+    "lei": "RON", "ron": "RON",
+    "лв": "BGN", "bgn": "BGN",
+    "rsd": "RSD",
+    "bam": "BAM",
+    "eur": "EUR", "€": "EUR",
+    "usd": "USD", "$": "USD",
+    "gbp": "GBP", "£": "GBP",
+    "hrk": "HRK",  # legacy HR
+    "rsd": "RSD",
+    "ron": "RON",
+    "rsd": "RSD",
+    "lei": "RON",
+}
+
+_price_num_re = re.compile(r"[-+]?\d{1,3}(?:[ .,\u00A0]?\d{3})*(?:[.,]\d{1,2})?")  # finds "1 234,50" / "1,234.50" / "1234"
+
+def _normalize_amount(txt: str) -> float | None:
+    """Extract first numeric-like token and normalize to float."""
+    if not txt:
+        return None
+    m = _price_num_re.search(txt)
+    if not m:
+        return None
+    raw = m.group(0)
+    # Heuristics:
+    #  - if both '.' and ',' appear, assume thousands sep + decimal separator per common EU patterns
+    #  - else if only ',' and it appears once and after last 3 digits -> decimal
+    #  - else strip spaces/nbspaces/dots/commas appropriately
+    s = raw.replace("\u00A0", " ").strip()
+    # Remove spaces as thousand sep
+    s = s.replace(" ", "")
+    if "," in s and "." in s:
+        # Pick last symbol as decimal; drop the other as thousands
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "")
+            s = s.replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    else:
+        # Only one of them or none
+        if s.count(",") == 1 and s.rfind(",") >= len(s) - 3:
+            s = s.replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    try:
+        val = float(s)
+    except Exception:
+        return None
+    return val
+
+def _normalize_currency(txt: str) -> str | None:
+    if not txt:
+        return None
+    t = txt.strip().lower()
+    # Try to find a 3-letter code or common symbols/aliases anywhere around the price
+    # We check tokens and the whole string.
+    for alias, code in _CURRENCY_ALIASES.items():
+        if alias in t:
+            return code
+    # Try strict 3-letter currency codes
+    m = re.search(r"\b([A-Z]{3})\b", txt.upper())
+    if m:
+        return m.group(1)
+    return None
+
+def parse_price_text(raw_text: str) -> tuple[float | None, str | None]:
+    """Return (amount, currency) parsed from raw text like '1 234,50 CZK' or 'EUR 99.90'."""
+    if not raw_text:
+        return None, None
+    amt = _normalize_amount(raw_text)
+    cur = _normalize_currency(raw_text)
+    return amt, cur
+
 def _looks_like_google_without_ns(root: ET.Element) -> bool:
     try:
         root_xml = ET.tostring(root, encoding="utf-8", method="xml")
