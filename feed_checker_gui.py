@@ -260,7 +260,7 @@ if not submitted:
 
 # 1) Get a file on disk
 if url.strip():
-    if not url.lower().startsWith(("http://", "https://")):  # guard
+    if not url.lower().startswith(("http://", "https://")):  # guard
         st.error("URL must start with http:// or https://"); st.stop()
     try:
         src_path = download_to_tmp(url.strip())
