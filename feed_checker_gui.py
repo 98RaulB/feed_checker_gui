@@ -28,7 +28,7 @@ try:
 except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
-st.set_page_config(page_title="Feed Checker (GUI)", layout="wide")
+st.set_page_config(page_title="FAVI Feed Checker", layout="wide")
 st.title("🧪 Feed Checker (GUI)")
 st.caption("Auto mode for small vs large feeds; optional Sample mode to process only the first N items (streaming & low RAM).")
 
