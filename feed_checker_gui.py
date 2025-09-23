@@ -20,6 +20,7 @@ from feed_specs import (
     gather_primary_image,
     read_link_raw,                 # RAW (no percent-encoding) to warn on spaces/non-ASCII
     gather_primary_image_raw,      # RAW
+    read_price,                    # <-- NEW: (amount, currency, raw_text)
 )
 
 # Safe XML parsing (defusedxml if present)
@@ -230,10 +231,20 @@ links: List[str] = []
 images: List[str] = []
 avails: List[str] = []
 
+# NEW: price buckets
+prices_amt: List[float | None] = []
+prices_cur: List[str | None] = []
+prices_raw: List[str] = []
+
 missing_id_idx: List[int] = []
 missing_link_idx: List[int] = []
 missing_img_idx: List[int] = []
 missing_avail_idx: List[int] = []
+
+# NEW: price issue indexes
+missing_price_idx: List[int] = []
+bad_price_idx: List[int] = []          # present but unparseable or <= 0
+missing_currency_idx: List[int] = []   # best-effort warn
 
 raw_links: List[str] = []
 raw_imgs: List[str] = []
@@ -255,19 +266,40 @@ def process_item(elem, index: int, spec: str):
     purl_raw = (read_link_raw(elem, spec) or "").strip()
     pimg_raw = (gather_primary_image_raw(elem, spec) or "").strip()
 
+    # NEW: price read
+    try:
+        amt, cur, raw_price = read_price(elem, spec)
+    except Exception:
+        amt, cur, raw_price = None, None, ""
+
     ids.append(pid); links.append(purl); images.append(pimg); avails.append(pav)
     raw_links.append(purl_raw); raw_imgs.append(pimg_raw)
+
+    prices_amt.append(amt)
+    prices_cur.append(cur)
+    prices_raw.append(raw_price or "")
 
     if not pid: missing_id_idx.append(index)
     if not purl: missing_link_idx.append(index)
     if not pimg: missing_img_idx.append(index)
     if not pav:  missing_avail_idx.append(index)
 
+    # Price validations
+    if (raw_price or "").strip() == "":
+        missing_price_idx.append(index)
+    else:
+        if (amt is None) or (amt is not None and amt <= 0):
+            bad_price_idx.append(index)
+        if cur is None:
+            missing_currency_idx.append(index)
+
+    # URL quality warnings from RAW
     if purl_raw and ((" " in purl_raw) or not ascii_only.match(purl_raw)):
         bad_url_idx.append(index)
     if pimg_raw and ((" " in pimg_raw) or not ascii_only.match(pimg_raw)):
         bad_img_idx.append(index)
 
+    # Duplicate tracking
     if pid:
         if pid in id_first_seen:
             dup_id_pairs.append((id_first_seen[pid], index, pid))
@@ -404,6 +436,9 @@ with c5:
         + len(missing_avail_idx)
         + len(bad_url_idx)
         + len(bad_img_idx)
+        + len(missing_price_idx)     # NEW
+        + len(bad_price_idx)         # NEW
+        + len(missing_currency_idx)  # NEW (warn)
     )
     any_warnings = total_warnings > 0
     status_pill(f"Warnings: {total_warnings}", "#f59e0b" if any_warnings else "#16a34a")
@@ -420,6 +455,11 @@ pass_fail["Primary image present"] = (True, len(missing_img_idx) > 0, f"(missing
 pass_fail["Availability present"] = (True, len(missing_avail_idx) > 0, f"(missing: {len(missing_avail_idx)})")
 pass_fail["Product URL validity"] = (True, len(bad_url_idx) > 0, f"(bad: {len(bad_url_idx)})")
 pass_fail["Image URL validity"] = (True, len(bad_img_idx) > 0, f"(bad: {len(bad_img_idx)})")
+
+# NEW: Price summary lines
+pass_fail["Price present"] = (len(missing_price_idx) == 0, False, f"(missing: {len(missing_price_idx)})")
+pass_fail["Price numeric > 0"] = (len(bad_price_idx) == 0, False, f"(invalid: {len(bad_price_idx)})")
+pass_fail["Currency detected (best-effort)"] = (True, len(missing_currency_idx) > 0, f"(missing: {len(missing_currency_idx)})")
 
 st.markdown("---")
 summarize(pass_fail)
@@ -459,6 +499,33 @@ missing_avail_rows = [
 ]
 show_issue_table("Missing Availability (by product ID)", missing_avail_rows, sample_show)
 
+# NEW: Price detail tables
+missing_price_rows = [
+    {"id": safe_get(ids, i) or "(missing id)", "link": safe_get(links, i), "raw_price": "(missing)"}
+    for i in missing_price_idx if safe_get(ids, i)
+]
+show_issue_table("Missing Price (by product ID)", missing_price_rows, sample_show)
+
+bad_price_rows = [
+    {"id": safe_get(ids, i) or "(missing id)",
+     "link": safe_get(links, i),
+     "raw_price": safe_get(prices_raw, i) or "(missing)",
+     "parsed_amount": safe_get(prices_amt, i),
+     "currency": safe_get(prices_cur, i) or "(unknown)",
+    }
+    for i in bad_price_idx
+]
+show_issue_table("Invalid Price (non-numeric or <= 0) — by product ID", bad_price_rows, sample_show)
+
+missing_currency_rows = [
+    {"id": safe_get(ids, i) or "(missing id)",
+     "link": safe_get(links, i),
+     "raw_price": safe_get(prices_raw, i) or "(missing)",
+    }
+    for i in missing_currency_idx if i not in missing_price_idx
+]
+show_issue_table("Price without detectable currency (FYI)", missing_currency_rows, sample_show)
+
 # Bad URL warnings (RAW)
 bad_url_rows = [
     {"id": safe_get(ids, i) or "(missing id)", "raw_url": safe_get(raw_links, i), "encoded_url": safe_get(links, i)}
@@ -486,7 +553,7 @@ for pid, idxs in dup_ids_map.items():
         "occurrences": len(unique_preserve([str(int(i)) for i in idxs])),
         "example_links": " | ".join(ex_links) if ex_links else ""
     })
-dup_id_rows.sort(key=lambda r: (-r["occurrences"], r["id"]))
+dup_id_rows.sort(key=lambda r: (-r["occurrences"], r["id"]])
 show_issue_table("Duplicate IDs (grouped)", dup_id_rows, sample_show)
 
 # Duplicates (URLs)
@@ -505,7 +572,7 @@ for url, idlist in url_to_ids.items():
         "num_ids": len(ids_u),
         "ids": ", ".join(ids_u[:12]) + (" …" if len(ids_u) > 12 else "")
     })
-dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"]))
+dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"]])
 show_issue_table("Duplicate Product URLs (grouped, with IDs)", dup_url_rows, sample_show)
 
 st.markdown("---")
@@ -514,3 +581,4 @@ st.caption(
      f"Scope: Auto (parser: {'Streaming' if (is_gzip_path(src_path) or file_size>SMALL_SIZE_LIMIT) else 'DOM'})")
 )
 st.markdown("© 2025 Raul Bertoldini")
+
