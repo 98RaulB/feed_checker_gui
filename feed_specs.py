@@ -14,7 +14,7 @@ NS = {
     "g": "http://base.google.com/ns/1.0",
     "content": "http://purl.org/rss/1.0/modules/content/",
     "atom": "http://www.w3.org/2005/Atom",
-    "hz": "http://www.zbozi.cz/ns/offer/1.0"
+    "hz": "http://www.zbozi.cz/ns/offer/1.0",
 }
 
 # -------------------- Small helpers --------------------
