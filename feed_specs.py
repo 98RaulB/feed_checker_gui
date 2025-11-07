@@ -14,6 +14,7 @@ NS = {
     "g": "http://base.google.com/ns/1.0",
     "content": "http://purl.org/rss/1.0/modules/content/",
     "atom": "http://www.w3.org/2005/Atom",
+    "hz": "http://www.zbozi.cz/ns/offer/1.0"
 }
 
 # -------------------- Small helpers --------------------
@@ -297,14 +298,39 @@ SPEC: Dict[str, Dict[str, Any]] = {
     },
 
     "Heureka strict": {
-        "item_paths": [".//SHOPITEM", ".//shopitem", ".//ShopItem"],
-        "id_paths": ["./ITEM_ID", "./item_id", "./ItemId", "./ITEMGROUP_ID", "./itemgroup_id"],
-        "link_paths": ["./URL", "./Url", "./url"],
-        "image_primary_paths": ["./IMGURL", "./ImgUrl", "./imgurl"],
-        "image_gallery_paths": ["./IMGURL_ALTERNATIVE", "./ImgUrl_Alternative", "./imgurl_alternative"],
-        "price_paths": ["./PRICE_VAT", "./price_vat"],
+        "item_paths": [
+            ".//hz:SHOPITEM",                    # added
+            ".//SHOPITEM", ".//shopitem", ".//ShopItem"
+        ],
+        "id_paths": [
+            "./hz:ITEM_ID", "./hz:item_id", "./hz:ItemId",            # added
+            "./hz:ITEMGROUP_ID", "./hz:itemgroup_id", "./hz:ItemGroupId",  # added
+            "./ITEM_ID", "./item_id", "./ItemId", "./ITEMGROUP_ID", "./itemgroup_id"
+        ],
+        "link_paths": [
+            "./hz:URL",                          # added
+            "./URL", "./Url", "./url"
+        ],
+        "image_primary_paths": [
+            "./hz:IMGURL",                       # added
+            "./IMGURL", "./ImgUrl", "./imgurl"
+        ],
+        "image_gallery_paths": [
+            "./hz:IMGURL_ALTERNATIVE",           # added
+            "./IMGURL_ALTERNATIVE", "./ImgUrl_Alternative", "./imgurl_alternative"
+        ],
+        "price_paths": [
+            "./hz:PRICE_VAT",                    # added
+            "./PRICE_VAT", "./price_vat"
+        ],
+    
+        # ⬇️ everything below stays functionally the same; we only PREPEND hz: variants to availability paths
         "required_fields": ["ITEM_ID|item_id", "PRODUCTNAME|productname", "URL|url", "IMGURL|imgurl"],
         "availability_paths": [
+            "./hz:AVAILABILITY", "./hz:availability",                 # added
+            "./hz:DELIVERY", "./hz:delivery",                         # added
+            "./hz:AVAILABILITY_DESC", "./hz:availability_desc",       # added
+            "./hz:DELIVERY_DATE", "./hz:delivery_date",               # added
             "./AVAILABILITY", "./availability",
             "./DELIVERY", "./delivery",
             "./AVAILABILITY_DESC", "./availability_desc",
