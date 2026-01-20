@@ -103,7 +103,15 @@ def localnames_from_item_paths(spec_name: str) -> set[str]:
 def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> str:
     """Stream a URL to a temp file (no giant bytes in memory). Returns file path."""
     import requests
-    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers={"User-Agent":"FeedChecker/GUI"}) as r:
+
+    # 1. Define a browser-like header
+    custom_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+    
+    # 2. Use it in the request
+    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers=custom_headers) as r:
         r.raise_for_status()
         ctype = r.headers.get("Content-Type","").lower()
         size_hdr = int(r.headers.get("Content-Length") or 0)
