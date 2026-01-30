@@ -21,6 +21,8 @@ from feed_specs import (
     read_link_raw,                 # RAW (no percent-encoding) to warn on spaces/non-ASCII
     gather_primary_image_raw,      # RAW
     read_price,                    # (amount, raw_text)
+    is_favi_compatible,            # Check if format can be directly used by FAVI
+    needs_conversion,              # Check if conversion is required
 )
 
 # Safe XML parsing (defusedxml if present)
@@ -103,15 +105,7 @@ def localnames_from_item_paths(spec_name: str) -> set[str]:
 def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> str:
     """Stream a URL to a temp file (no giant bytes in memory). Returns file path."""
     import requests
-
-    # 1. Define a browser-like header
-    custom_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
-    
-    # 2. Use it in the request
-    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers=custom_headers) as r:
+    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers={"User-Agent":"FeedChecker/GUI"}) as r:
         r.raise_for_status()
         ctype = r.headers.get("Content-Type","").lower()
         size_hdr = int(r.headers.get("Content-Length") or 0)
@@ -503,19 +497,26 @@ with c4:
     status_pill(f"Missing IDs: {len(missing_id_idx)}", "#dc2626" if len(missing_id_idx)>0 else "#16a34a")
 
 with c5:
-    total_warnings = (
+    # Critical issues: URLs with non-ASCII or spaces (major encoding problems)
+    critical_url_issues = len(bad_url_idx) + len(bad_img_idx)
+    
+    # Other warnings
+    other_warnings = (
         len(missing_link_idx)
         + len(missing_img_idx)
         + len(missing_avail_idx)
-        + len(bad_url_idx)
-        + len(bad_img_idx)
         + len(missing_price_idx)
         + len(bad_price_idx)
         + len(invalid_price_format_idx)
         + len(overprecision_price_idx)
     )
-    any_warnings = total_warnings > 0
-    status_pill(f"Warnings: {total_warnings}", "#f59e0b" if any_warnings else "#16a34a")
+    
+    if critical_url_issues > 0:
+        status_pill(f"⚠️ CRITICAL: {critical_url_issues} URL encoding issues", "#dc2626")
+    elif other_warnings > 0:
+        status_pill(f"Warnings: {other_warnings}", "#f59e0b")
+    else:
+        status_pill("No issues", "#16a34a")
 
 # ---------- SUMMARY ----------
 pass_fail: Dict[str, Tuple[bool, bool, str]] = {}
@@ -527,8 +528,17 @@ pass_fail["Duplicate Product URLs"] = (len(dup_link_pairs) == 0, False, f"(dupli
 pass_fail["Product URL present"] = (True, len(missing_link_idx) > 0, f"(missing: {len(missing_link_idx)})")
 pass_fail["Primary image present"] = (True, len(missing_img_idx) > 0, f"(missing: {len(missing_img_idx)})")
 pass_fail["Availability present"] = (True, len(missing_avail_idx) > 0, f"(missing: {len(missing_avail_idx)})")
-pass_fail["Product URL validity"] = (True, len(bad_url_idx) > 0, f"(bad: {len(bad_url_idx)})")
-pass_fail["Image URL validity"] = (True, len(bad_img_idx) > 0, f"(bad: {len(bad_img_idx)})")
+# URL validity is CRITICAL (FAIL) not just a warning - encoding issues cause major problems
+pass_fail["Product URL validity (no spaces/special chars)"] = (
+    len(bad_url_idx) == 0, 
+    False, 
+    f"(CRITICAL: {len(bad_url_idx)} URLs with encoding issues)" if len(bad_url_idx) > 0 else ""
+)
+pass_fail["Image URL validity (no spaces/special chars)"] = (
+    len(bad_img_idx) == 0, 
+    False, 
+    f"(CRITICAL: {len(bad_img_idx)} image URLs with encoding issues)" if len(bad_img_idx) > 0 else ""
+)
 
 # PRICE summary lines (all as WARNs, never FAIL)
 pass_fail["Price present"] = (True, len(missing_price_idx) > 0, f"(missing: {len(missing_price_idx)})")
@@ -538,7 +548,34 @@ pass_fail["Price format follows FAVI rules"] = (True, len(invalid_price_format_i
 pass_fail["Price precision (<= 2 decimals)"] = (True, len(overprecision_price_idx) > 0,
                                                f"(over-precision: {len(overprecision_price_idx)})")
 
+# Check FAVI compatibility
+favi_compat = is_favi_compatible(spec_name)
+conv_required, conv_note = needs_conversion(spec_name)
+pass_fail["FAVI direct compatibility"] = (favi_compat, not favi_compat and not conv_required, 
+                                          conv_note if conv_required else "")
+
 st.markdown("---")
+
+# Show FAVI compatibility warning if needed
+if conv_required:
+    st.error(f"""
+    ⚠️ **FAVI CANNOT PARSE THIS FEED DIRECTLY**
+    
+    **Detected format:** {spec_name}
+    
+    **Reason:** {conv_note}
+    
+    **Solution:** Use the AWS Lambda feed transformer to convert this feed to Google Shopping or element-based Ceneje format before importing to FAVI.
+    """)
+elif not favi_compat:
+    st.warning(f"""
+    ⚠️ **Feed format may not be fully compatible with FAVI**
+    
+    **Detected format:** {spec_name}
+    
+    Consider converting this feed to Google Shopping format for best compatibility.
+    """)
+
 summarize(pass_fail)
 
 # ---------- DETAILS ----------
@@ -611,18 +648,30 @@ overprecision_rows = [
 ]
 show_issue_table("Price over-precision (> 2 decimals) — informational", overprecision_rows, sample_show)
 
-# Bad URL warnings (RAW)
+# CRITICAL: Bad URL warnings (RAW) - these cause major feed processing issues
+st.markdown("### 🚨 CRITICAL: URL Encoding Issues")
+st.warning(
+    "⚠️ URLs with spaces or non-ASCII characters (Cyrillic, Chinese, Arabic, emoji, etc.) can cause feed rejection. "
+    "These MUST be properly percent-encoded. Your feed transformer should handle this automatically, but verify the output."
+)
+
 bad_url_rows = [
-    {"id": safe_get(ids, i) or "(missing id)", "raw_url": safe_get(raw_links, i), "encoded_url": safe_get(links, i)}
+    {"id": safe_get(ids, i) or "(missing id)", 
+     "raw_url": safe_get(raw_links, i), 
+     "encoded_url": safe_get(links, i),
+     "issue": "Non-ASCII chars" if not ascii_only.match(safe_get(raw_links, i)) else "Contains spaces"}
     for i in bad_url_idx
 ]
-show_issue_table("Bad Product URLs (spaces/non-ASCII) — RAW view", bad_url_rows, sample_show)
+show_issue_table("🔴 CRITICAL: Bad Product URLs (require encoding)", bad_url_rows, sample_show)
 
 bad_img_rows = [
-    {"id": safe_get(ids, i) or "(missing id)", "raw_image_url": safe_get(raw_imgs, i), "encoded_image_url": safe_get(images, i)}
+    {"id": safe_get(ids, i) or "(missing id)", 
+     "raw_image_url": safe_get(raw_imgs, i), 
+     "encoded_image_url": safe_get(images, i),
+     "issue": "Non-ASCII chars" if not ascii_only.match(safe_get(raw_imgs, i)) else "Contains spaces"}
     for i in bad_img_idx
 ]
-show_issue_table("Bad Image URLs (spaces/non-ASCII) — RAW view", bad_img_rows, sample_show)
+show_issue_table("🔴 CRITICAL: Bad Image URLs (require encoding)", bad_img_rows, sample_show)
 
 # Duplicates (IDs)
 dup_ids_map: Dict[str, List[int]] = defaultdict(list)
