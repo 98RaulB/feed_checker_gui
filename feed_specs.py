@@ -299,38 +299,36 @@ SPEC: Dict[str, Dict[str, Any]] = {
 
     "Heureka strict": {
         "item_paths": [
-            ".//hz:SHOPITEM",                    # added
+            ".//hz:SHOPITEM",
             ".//SHOPITEM", ".//shopitem", ".//ShopItem"
         ],
         "id_paths": [
-            "./hz:ITEM_ID", "./hz:item_id", "./hz:ItemId",            # added
-            "./hz:ITEMGROUP_ID", "./hz:itemgroup_id", "./hz:ItemGroupId",  # added
+            "./hz:ITEM_ID", "./hz:item_id", "./hz:ItemId",
+            "./hz:ITEMGROUP_ID", "./hz:itemgroup_id", "./hz:ItemGroupId",
             "./ITEM_ID", "./item_id", "./ItemId", "./ITEMGROUP_ID", "./itemgroup_id"
         ],
         "link_paths": [
-            "./hz:URL",                          # added
+            "./hz:URL",
             "./URL", "./Url", "./url"
         ],
         "image_primary_paths": [
-            "./hz:IMGURL",                       # added
+            "./hz:IMGURL",
             "./IMGURL", "./ImgUrl", "./imgurl"
         ],
         "image_gallery_paths": [
-            "./hz:IMGURL_ALTERNATIVE",           # added
+            "./hz:IMGURL_ALTERNATIVE",
             "./IMGURL_ALTERNATIVE", "./ImgUrl_Alternative", "./imgurl_alternative"
         ],
         "price_paths": [
-            "./hz:PRICE_VAT",                    # added
+            "./hz:PRICE_VAT",
             "./PRICE_VAT", "./price_vat"
         ],
-    
-        # ⬇️ everything below stays functionally the same; we only PREPEND hz: variants to availability paths
         "required_fields": ["ITEM_ID|item_id", "PRODUCTNAME|productname", "URL|url", "IMGURL|imgurl"],
         "availability_paths": [
-            "./hz:AVAILABILITY", "./hz:availability",                 # added
-            "./hz:DELIVERY", "./hz:delivery",                         # added
-            "./hz:AVAILABILITY_DESC", "./hz:availability_desc",       # added
-            "./hz:DELIVERY_DATE", "./hz:delivery_date",               # added
+            "./hz:AVAILABILITY", "./hz:availability",
+            "./hz:DELIVERY", "./hz:delivery",
+            "./hz:AVAILABILITY_DESC", "./hz:availability_desc",
+            "./hz:DELIVERY_DATE", "./hz:delivery_date",
             "./AVAILABILITY", "./availability",
             "./DELIVERY", "./delivery",
             "./AVAILABILITY_DESC", "./availability_desc",
@@ -378,17 +376,17 @@ SPEC: Dict[str, Dict[str, Any]] = {
 
     "Jeftinije / Ceneje strict": {
         "item_paths": [".//Item"],
-        "id_paths": ["./ID", "./id"],
-        "link_paths": ["./link"],
-        "image_primary_paths": ["./mainImage", "./image"],
-        "price_paths": ["./price", "./Price"],
-        "required_fields": ["id", "name", "link", "mainimage|image", "price"],
-        "availability_paths": ["./availability", "./in_stock", "./stock"],
+        "id_paths": ["@ID", "@id", "./ID", "./id"],
+        "link_paths": ["@link", "./link"],
+        "image_primary_paths": ["@slikaVelika", "@slikaMala", "@image", "@mainImage", "./mainImage", "./image"],
+        "price_paths": ["@price", "./price", "./Price"],
+        "required_fields": ["id", "name", "link", "image", "price"],
+        "availability_paths": ["@in_stock", "@availability", "@stock", "./availability", "./in_stock", "./stock"],
         "availability_aliases": ["availability", "in_stock", "stock"],
         "signature_tags": [
             "id","name","link","mainimage","image","price","brand","category","availability","description"
         ],
-        "expected_root_locals": ["items","products","shop"],
+        "expected_root_locals": ["items","products","shop","cnjexport"],
     },
 
     "Ceneo strict": {
