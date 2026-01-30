@@ -374,19 +374,38 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "expected_root_locals": ["products"],
     },
 
-    "Jeftinije / Ceneje strict": {
+    "Jeftinije / Ceneje (element-based)": {
         "item_paths": [".//Item"],
-        "id_paths": ["@ID", "@id", "./ID", "./id"],
-        "link_paths": ["@link", "./link"],
-        "image_primary_paths": ["@slikaVelika", "@slikaMala", "@image", "@mainImage", "./mainImage", "./image"],
-        "price_paths": ["@price", "./price", "./Price"],
+        "id_paths": ["./ID", "./id"],
+        "link_paths": ["./link"],
+        "image_primary_paths": ["./mainImage", "./image", "./slikaVelika", "./slikaMala"],
+        "price_paths": ["./price", "./Price"],
         "required_fields": ["id", "name", "link", "image", "price"],
-        "availability_paths": ["@in_stock", "@availability", "@stock", "./availability", "./in_stock", "./stock"],
+        "availability_paths": ["./availability", "./in_stock", "./stock"],
         "availability_aliases": ["availability", "in_stock", "stock"],
         "signature_tags": [
             "id","name","link","mainimage","image","price","brand","category","availability","description"
         ],
-        "expected_root_locals": ["items","products","shop","cnjexport"],
+        "expected_root_locals": ["items","products","shop"],
+        "favi_compatible": True,
+    },
+
+    "Ceneje.si (attribute-based)": {
+        "item_paths": [".//Item"],
+        "id_paths": ["@ID", "@id"],
+        "link_paths": ["@link"],
+        "image_primary_paths": ["@slikaVelika", "@slikaMala", "@image", "@mainImage"],
+        "price_paths": ["@price"],
+        "required_fields": ["id", "name", "link", "image", "price"],
+        "availability_paths": ["@in_stock", "@availability", "@stock"],
+        "availability_aliases": ["availability", "in_stock", "stock"],
+        "signature_tags": [
+            "id","name","link","mainimage","image","price","brand","category","availability","description"
+        ],
+        "expected_root_locals": ["cnjexport", "items", "products"],
+        "favi_compatible": False,
+        "conversion_required": True,
+        "conversion_note": "Attribute-based Ceneje.si format - FAVI requires element-based format. Use Lambda transformer to convert.",
     },
 
     "Ceneo strict": {
@@ -435,8 +454,22 @@ def detect_spec(root: ET.Element) -> str:
         return "Ceneo strict"
 
     # CENEJE / JEFTINIJE: <Item> or <item> anywhere
+    # Distinguish between attribute-based (Ceneje.si) and element-based (Jeftinije)
     if _exists(root, ".//Item") or _exists_local(root, "item"):
-        return "Jeftinije / Ceneje strict"
+        sample = root.find(".//Item") or _first_local(root, "item")
+        if sample is not None:
+            # Check if it uses attributes (Ceneje.si style) or child elements (Jeftinije style)
+            has_attr_id = sample.get("ID") is not None or sample.get("id") is not None
+            has_attr_price = sample.get("price") is not None
+            has_attr_link = sample.get("link") is not None
+            has_elem_id = sample.find("./ID") is not None or sample.find("./id") is not None
+            
+            if has_attr_id or has_attr_price or has_attr_link:
+                return "Ceneje.si (attribute-based)"
+            elif has_elem_id:
+                return "Jeftinije / Ceneje (element-based)"
+        # Default to element-based if can't determine
+        return "Jeftinije / Ceneje (element-based)"
 
     # Compari / Skroutz: look for <product>. Skroutz has price_with_vat.
     if _exists(root, ".//product") or _exists_local(root, "product"):
@@ -538,3 +571,17 @@ def expected_root_locals(spec_name: str) -> List[str]:
 def requires_google_ns(spec_name: str) -> bool:
     frags = SPEC.get(spec_name, {}).get("required_ns_fragments", [])
     return bool(frags)
+
+def is_favi_compatible(spec_name: str) -> bool:
+    """Check if the feed format can be parsed directly by FAVI (element-based formats only)."""
+    spec = SPEC.get(spec_name, {})
+    # Default to True for most formats; only attribute-based formats set this to False
+    return spec.get("favi_compatible", True)
+
+def needs_conversion(spec_name: str) -> Tuple[bool, str]:
+    """Check if the feed needs conversion before FAVI can use it."""
+    spec = SPEC.get(spec_name, {})
+    if spec.get("conversion_required", False):
+        note = spec.get("conversion_note", "Conversion required for FAVI compatibility")
+        return True, note
+    return False, ""
