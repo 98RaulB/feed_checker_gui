@@ -21,9 +21,20 @@ from feed_specs import (
     read_link_raw,                 # RAW (no percent-encoding) to warn on spaces/non-ASCII
     gather_primary_image_raw,      # RAW
     read_price,                    # (amount, raw_text)
-    is_favi_compatible,            # Check if format can be directly used by FAVI
-    needs_conversion,              # Check if conversion is required
 )
+
+# The two helpers below were added recently to `feed_specs.py`.
+# Import them if available, otherwise provide safe fallbacks so the
+# Streamlit app does not fail on older deployments where the module
+# hasn't been updated yet.
+try:
+    from feed_specs import is_favi_compatible, needs_conversion
+except Exception:
+    def is_favi_compatible(spec_name: str) -> bool:
+        return True
+
+    def needs_conversion(spec_name: str) -> tuple[bool, str]:
+        return (False, "")
 
 # Safe XML parsing (defusedxml if present)
 try:
@@ -715,3 +726,4 @@ st.caption(
      f"Scope: Auto (parser: {'Streaming' if (is_gzip_path(src_path) or file_size>SMALL_SIZE_LIMIT) else 'DOM'})")
 )
 st.markdown("© 2025 Raul Bertoldini")
+
