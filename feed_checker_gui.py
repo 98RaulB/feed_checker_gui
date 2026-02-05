@@ -660,11 +660,7 @@ overprecision_rows = [
 show_issue_table("Price over-precision (> 2 decimals) — informational", overprecision_rows, sample_show)
 
 # CRITICAL: Bad URL warnings (RAW) - these cause major feed processing issues
-st.markdown("### 🚨 CRITICAL: URL Encoding Issues")
-st.warning(
-    "⚠️ URLs with spaces or non-ASCII characters (Cyrillic, Chinese, Arabic, emoji, etc.) can cause feed rejection. "
-    "These MUST be properly percent-encoded. Your feed transformer should handle this automatically, but verify the output."
-)
+st.markdown("### CRITICAL: URL Encoding Issues")
 
 bad_url_rows = [
     {"id": safe_get(ids, i) or "(missing id)", 
@@ -673,7 +669,7 @@ bad_url_rows = [
      "issue": "Non-ASCII chars" if not ascii_only.match(safe_get(raw_links, i)) else "Contains spaces"}
     for i in bad_url_idx
 ]
-show_issue_table("🔴 CRITICAL: Bad Product URLs (require encoding)", bad_url_rows, sample_show)
+show_issue_table("CRITICAL: Bad Product URLs (require encoding)", bad_url_rows, sample_show)
 
 bad_img_rows = [
     {"id": safe_get(ids, i) or "(missing id)", 
