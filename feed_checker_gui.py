@@ -659,9 +659,6 @@ overprecision_rows = [
 ]
 show_issue_table("Price over-precision (> 2 decimals) — informational", overprecision_rows, sample_show)
 
-# CRITICAL: Bad URL warnings (RAW) - these cause major feed processing issues
-st.markdown("### CRITICAL: URL Encoding Issues")
-
 bad_url_rows = [
     {"id": safe_get(ids, i) or "(missing id)", 
      "raw_url": safe_get(raw_links, i), 
