@@ -429,6 +429,23 @@ SPEC: Dict[str, Dict[str, Any]] = {
 def _exists(root, xpath: str) -> bool:
     return root.find(xpath, namespaces=NS) is not None
 
+def _root_local(root: ET.Element) -> str:
+    return strip_ns(root.tag).lower() if isinstance(root.tag, str) else ""
+
+def _child_localnames(elem: ET.Element) -> set[str]:
+    return {
+        strip_ns(child.tag).lower()
+        for child in list(elem)
+        if isinstance(child.tag, str)
+    }
+
+def _attr_names(elem: ET.Element) -> set[str]:
+    return {str(k).lower() for k in elem.attrib.keys()}
+
+def _matches_expected_root(root: ET.Element, spec_name: str) -> bool:
+    expected = {name.lower() for name in expected_root_locals(spec_name)}
+    return not expected or _root_local(root) in expected
+
 def detect_spec(root: ET.Element) -> str:
     root_xml = ET.tostring(root, encoding="utf-8", method="xml")
 
@@ -451,33 +468,73 @@ def detect_spec(root: ET.Element) -> str:
 
     # CENEO: <o> anywhere
     if _exists(root, ".//o") or _exists_local(root, "o"):
-        return "Ceneo strict"
+        sample = root.find(".//o") or _first_local(root, "o")
+        if sample is not None:
+            attr_names = _attr_names(sample)
+            child_names = _child_localnames(sample)
+            ceneo_hits = len(attr_names & {"id", "price", "url", "avail", "availability", "stock"})
+            ceneo_hits += len(child_names & {"name", "price", "cat", "imgs", "desc"})
+            if _matches_expected_root(root, "Ceneo strict") and ceneo_hits >= 3:
+                return "Ceneo strict"
 
     # CENEJE / JEFTINIJE: <Item> or <item> anywhere
     # Distinguish between attribute-based (Ceneje.si) and element-based (Jeftinije)
     if _exists(root, ".//Item") or _exists_local(root, "item"):
         sample = root.find(".//Item") or _first_local(root, "item")
         if sample is not None:
+            child_names = _child_localnames(sample)
+            attr_names = _attr_names(sample)
+
             # Check if it uses attributes (Ceneje.si style) or child elements (Jeftinije style)
             has_attr_id = sample.get("ID") is not None or sample.get("id") is not None
             has_attr_price = sample.get("price") is not None
             has_attr_link = sample.get("link") is not None
             has_elem_id = sample.find("./ID") is not None or sample.find("./id") is not None
-            
-            if has_attr_id or has_attr_price or has_attr_link:
+
+            attr_hits = len(attr_names & {
+                "id", "link", "price", "slikavelika", "slikamala", "image", "mainimage"
+            })
+            elem_hits = len(child_names & {
+                "id", "name", "link", "mainimage", "image", "slikavelika", "slikamala",
+                "price", "availability", "description"
+            })
+
+            if (
+                (has_attr_id or has_attr_price or has_attr_link)
+                and _matches_expected_root(root, "Ceneje.si (attribute-based)")
+                and attr_hits >= 2
+            ):
                 return "Ceneje.si (attribute-based)"
-            elif has_elem_id:
+            elif (
+                has_elem_id
+                and _matches_expected_root(root, "Jeftinije / Ceneje (element-based)")
+                and elem_hits >= 3
+            ):
                 return "Jeftinije / Ceneje (element-based)"
-        # Default to element-based if can't determine
-        return "Jeftinije / Ceneje (element-based)"
 
     # Compari / Skroutz: look for <product>. Skroutz has price_with_vat.
     if _exists(root, ".//product") or _exists_local(root, "product"):
         sample = root.find(".//product", namespaces=NS) or _first_local(root, "product")
-        if sample is not None and (sample.find("./price_with_vat", namespaces=NS) is not None or
-                                   any(strip_ns(c.tag).lower()=="price_with_vat" for c in list(sample))):
-            return "Skroutz strict"
-        return "Compari / Árukereső / Pazaruvaj (case-insensitive)"
+        if sample is not None:
+            child_names = _child_localnames(sample)
+
+            skroutz_hits = len(child_names & {"id", "name", "link", "image", "price_with_vat", "category"})
+            if (
+                "price_with_vat" in child_names
+                and _matches_expected_root(root, "Skroutz strict")
+                and skroutz_hits >= 3
+            ):
+                return "Skroutz strict"
+
+            compari_hits = len(child_names & {
+                "identifier", "productid", "name", "product_url", "image_url",
+                "price", "category", "description"
+            })
+            if (
+                _matches_expected_root(root, "Compari / Árukereső / Pazaruvaj (case-insensitive)")
+                and compari_hits >= 3
+            ):
+                return "Compari / Árukereső / Pazaruvaj (case-insensitive)"
 
     # Fallbacks for odd Google
     if any(strip_ns(e.tag).lower() == "entry" for e in root.iter()) and b"base.google.com/ns/1.0" in root_xml:
