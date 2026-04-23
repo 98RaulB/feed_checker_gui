@@ -83,6 +83,37 @@ def summarize(pass_fail: Dict[str, Tuple[bool, bool, str]]):
         _, text = verdict_row(k, ok, warn, extra)
         st.write(f"- **{k}**: {text}")
 
+def clickup_card_metric(label: str, value: str):
+    safe_label = str(label).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    safe_value = str(value or "Not set").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    st.markdown(
+        f"""
+        <div style="
+            background:#f8f7ff;
+            border:1px solid #ddd6fe;
+            border-radius:14px;
+            padding:12px 14px;
+            margin-bottom:10px;
+        ">
+            <div style="
+                font-size:12px;
+                font-weight:700;
+                letter-spacing:0.04em;
+                text-transform:uppercase;
+                color:#6d28d9;
+                margin-bottom:4px;
+            ">{safe_label}</div>
+            <div style="
+                font-size:14px;
+                color:#1f2937;
+                line-height:1.35;
+                word-break:break-word;
+            ">{safe_value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 def status_pill(text: str, color: str = "#16a34a"):  # green default
     st.markdown(
         f"""
@@ -742,8 +773,6 @@ elif not favi_compat:
     Consider converting this feed to Google Shopping format for best compatibility.
     """)
 
-summarize(pass_fail)
-
 # ---------- CLICKUP DRAFT ----------
 problem_codes = build_problem_codes(
     xml_ok=xml_ok,
@@ -798,35 +827,7 @@ if st.session_state.get("clickup_draft_seed") != draft_seed:
         st.session_state[f"clickup_{field_name}"] = value
     st.session_state["clickup_draft_seed"] = draft_seed
 
-st.markdown("---")
-st.subheader("ClickUp Draft")
-st.caption("The checker prepares a ticket draft from the feed results. You can edit everything before opening the ClickUp form.")
-
-draft_col1, draft_col2 = st.columns(2, gap="large")
-with draft_col1:
-    st.text_input("Shop name", key="clickup_shop_name")
-with draft_col2:
-    inferred_country = st.session_state.get("clickup_country", "")
-    st.selectbox(
-        "Country",
-        [""] + CLICKUP_COUNTRIES,
-        index=([""] + CLICKUP_COUNTRIES).index(inferred_country) if inferred_country in CLICKUP_COUNTRIES else 0,
-        key="clickup_country",
-    )
-
-st.text_area("Issue / request / CRM", key="clickup_issue_request_crm", height=140)
-
-draft_col3, draft_col4 = st.columns(2, gap="large")
-with draft_col3:
-    st.text_input("Input XML feed URL", key="clickup_input_xml_feed_url")
-with draft_col4:
-    inferred_format = st.session_state.get("clickup_input_feed_format", "OTHER")
-    st.selectbox(
-        "Input feed format",
-        CLICKUP_FORMATS,
-        index=CLICKUP_FORMATS.index(inferred_format) if inferred_format in CLICKUP_FORMATS else CLICKUP_FORMATS.index("OTHER"),
-        key="clickup_input_feed_format",
-    )
+summary_col, clickup_col = st.columns([1.35, 1], gap="large")
 
 clickup_payload = {
     "shop_name": st.session_state.get("clickup_shop_name", "").strip(),
@@ -840,11 +841,84 @@ clickup_payload = {
 }
 clickup_url = make_clickup_url(clickup_payload)
 
-st.link_button("Send to ClickUp", clickup_url)
-st.caption("If FAVI AM Tools is installed, the ClickUp form opens with this draft ready to autofill.")
+with summary_col:
+    summarize(pass_fail)
 
-with st.expander("Payload preview"):
-    st.json(clickup_payload)
+with clickup_col:
+    st.markdown(
+        """
+        <div style="
+            background:linear-gradient(180deg, #ffffff 0%, #f7f4ff 100%);
+            border:1px solid #d8b4fe;
+            border-radius:20px;
+            padding:18px 18px 10px 18px;
+            box-shadow:0 10px 30px rgba(109, 40, 217, 0.10);
+            margin-top:6px;
+        ">
+            <div style="
+                display:inline-block;
+                padding:5px 10px;
+                border-radius:999px;
+                background:#ede9fe;
+                color:#6d28d9;
+                font-size:12px;
+                font-weight:700;
+                margin-bottom:10px;
+            ">CLICKUP DRAFT</div>
+            <div style="
+                font-size:22px;
+                font-weight:700;
+                color:#2e1065;
+                margin-bottom:6px;
+            ">Ready to send</div>
+            <div style="
+                color:#5b4b8a;
+                font-size:14px;
+                line-height:1.45;
+                margin-bottom:14px;
+            ">The checker prepared a compact ticket draft from this feed. Adjust anything you want, then open the ClickUp form with the draft attached.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    clickup_card_metric("Shop", clickup_payload["shop_name"])
+    clickup_card_metric("Country", clickup_payload["country"])
+    clickup_card_metric("Format", clickup_payload["input_feed_format"])
+    clickup_card_metric("Source URL", clickup_payload["input_xml_feed_url"] or src_label)
+
+    with st.expander("Edit draft"):
+        draft_col1, draft_col2 = st.columns(2, gap="medium")
+        with draft_col1:
+            st.text_input("Shop name", key="clickup_shop_name")
+        with draft_col2:
+            inferred_country = st.session_state.get("clickup_country", "")
+            st.selectbox(
+                "Country",
+                [""] + CLICKUP_COUNTRIES,
+                index=([""] + CLICKUP_COUNTRIES).index(inferred_country) if inferred_country in CLICKUP_COUNTRIES else 0,
+                key="clickup_country",
+            )
+
+        st.text_area("Issue / request / CRM", key="clickup_issue_request_crm", height=120)
+
+        draft_col3, draft_col4 = st.columns(2, gap="medium")
+        with draft_col3:
+            st.text_input("Input XML feed URL", key="clickup_input_xml_feed_url")
+        with draft_col4:
+            inferred_format = st.session_state.get("clickup_input_feed_format", "OTHER")
+            st.selectbox(
+                "Input feed format",
+                CLICKUP_FORMATS,
+                index=CLICKUP_FORMATS.index(inferred_format) if inferred_format in CLICKUP_FORMATS else CLICKUP_FORMATS.index("OTHER"),
+                key="clickup_input_feed_format",
+            )
+
+    st.link_button("Send to ClickUp", clickup_url, use_container_width=True)
+    st.caption("If FAVI AM Tools is installed, the form opens with this draft ready to autofill.")
+
+    with st.expander("Payload preview"):
+        st.json(clickup_payload)
 
 # ---------- DETAILS ----------
 st.markdown("---")
