@@ -845,16 +845,9 @@ with summary_col:
     summarize(pass_fail)
 
 with clickup_col:
-    st.markdown(
-        """
-        <div style="
-            background:linear-gradient(180deg, #ffffff 0%, #f7f4ff 100%);
-            border:1px solid #d8b4fe;
-            border-radius:20px;
-            padding:18px 18px 10px 18px;
-            box-shadow:0 10px 30px rgba(109, 40, 217, 0.10);
-            margin-top:6px;
-        ">
+    with st.container(border=True):
+        st.markdown(
+            """
             <div style="
                 display:inline-block;
                 padding:5px 10px;
@@ -865,6 +858,11 @@ with clickup_col:
                 font-weight:700;
                 margin-bottom:10px;
             ">CLICKUP DRAFT</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            """
             <div style="
                 font-size:22px;
                 font-weight:700;
@@ -876,21 +874,14 @@ with clickup_col:
                 font-size:14px;
                 line-height:1.45;
                 margin-bottom:14px;
-            ">The checker prepared a compact ticket draft from this feed. Adjust anything you want, then open the ClickUp form with the draft attached.</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+            ">Review the draft, make any edits you want, then open ClickUp with everything prepared.</div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    clickup_card_metric("Shop", clickup_payload["shop_name"])
-    clickup_card_metric("Country", clickup_payload["country"])
-    clickup_card_metric("Format", clickup_payload["input_feed_format"])
-    clickup_card_metric("Source URL", clickup_payload["input_xml_feed_url"] or src_label)
-
-    with st.expander("Edit draft"):
         draft_col1, draft_col2 = st.columns(2, gap="medium")
         with draft_col1:
-            st.text_input("Shop name", key="clickup_shop_name")
+            st.text_input("Shop name", key="clickup_shop_name", placeholder="Shop name")
         with draft_col2:
             inferred_country = st.session_state.get("clickup_country", "")
             st.selectbox(
@@ -900,11 +891,20 @@ with clickup_col:
                 key="clickup_country",
             )
 
-        st.text_area("Issue / request / CRM", key="clickup_issue_request_crm", height=120)
+        st.text_area(
+            "Issue / request / CRM",
+            key="clickup_issue_request_crm",
+            height=120,
+            placeholder="Short summary of what is missing or what needs to be converted.",
+        )
 
         draft_col3, draft_col4 = st.columns(2, gap="medium")
         with draft_col3:
-            st.text_input("Input XML feed URL", key="clickup_input_xml_feed_url")
+            st.text_input(
+                "Input XML feed URL",
+                key="clickup_input_xml_feed_url",
+                placeholder="https://example.com/feed.xml",
+            )
         with draft_col4:
             inferred_format = st.session_state.get("clickup_input_feed_format", "OTHER")
             st.selectbox(
@@ -914,11 +914,34 @@ with clickup_col:
                 key="clickup_input_feed_format",
             )
 
-    st.link_button("Send to ClickUp", clickup_url, use_container_width=True)
-    st.caption("If FAVI AM Tools is installed, the form opens with this draft ready to autofill.")
+        st.markdown(
+            f"""
+            <div style="
+                background:#f8f7ff;
+                border:1px solid #ddd6fe;
+                border-radius:14px;
+                padding:12px 14px;
+                margin:8px 0 14px 0;
+            ">
+                <div style="
+                    font-size:12px;
+                    font-weight:700;
+                    letter-spacing:0.04em;
+                    text-transform:uppercase;
+                    color:#6d28d9;
+                    margin-bottom:6px;
+                ">Detected from check</div>
+                <div style="font-size:14px; color:#1f2937; line-height:1.5;">
+                    <strong>Transformation:</strong> {clickup_payload["detected_transformation"]}<br>
+                    <strong>Problem codes:</strong> {", ".join(problem_codes) if problem_codes else "none"}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    with st.expander("Payload preview"):
-        st.json(clickup_payload)
+        st.link_button("Send to ClickUp", clickup_url, use_container_width=True)
+        st.caption("The form opens with this draft attached. Review it there and submit.")
 
 # ---------- DETAILS ----------
 st.markdown("---")
