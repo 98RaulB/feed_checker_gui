@@ -834,47 +834,52 @@ with summary_col:
     summarize(pass_fail)
 
 with clickup_col:
-    if not st.session_state.get("clickup_editor_open", False):
-        st.markdown(
-            """
+    editor_open = st.session_state.get("clickup_editor_open", False)
+    st.markdown(
+        """
+        <div style="
+            background:linear-gradient(180deg, #ffffff 0%, #f7f4ff 100%);
+            border:1px solid #d8b4fe;
+            border-radius:20px;
+            padding:18px;
+            box-shadow:0 10px 30px rgba(109, 40, 217, 0.10);
+            margin-top:6px;
+            margin-bottom:12px;
+        ">
             <div style="
-                background:linear-gradient(180deg, #ffffff 0%, #f7f4ff 100%);
-                border:1px solid #d8b4fe;
-                border-radius:20px;
-                padding:18px;
-                box-shadow:0 10px 30px rgba(109, 40, 217, 0.10);
-                margin-top:6px;
-            ">
-                <div style="
-                    display:inline-block;
-                    padding:5px 10px;
-                    border-radius:999px;
-                    background:#ede9fe;
-                    color:#6d28d9;
-                    font-size:12px;
-                    font-weight:700;
-                    margin-bottom:10px;
-                ">CLICKUP</div>
-                <div style="
-                    font-size:22px;
-                    font-weight:700;
-                    color:#2e1065;
-                    margin-bottom:6px;
-                ">Ticket draft ready</div>
-                <div style="
-                    color:#5b4b8a;
-                    font-size:14px;
-                    line-height:1.45;
-                    margin-bottom:14px;
-                ">We already filled what we can from the feed check. Open the draft to review and edit it before sending.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        if st.button("Send to ClickUp for editing", use_container_width=True, type="primary"):
-            st.session_state["clickup_editor_open"] = True
-            st.rerun()
-    else:
+                display:inline-block;
+                padding:5px 10px;
+                border-radius:999px;
+                background:#ede9fe;
+                color:#6d28d9;
+                font-size:12px;
+                font-weight:700;
+                margin-bottom:10px;
+            ">CLICKUP</div>
+            <div style="
+                font-size:22px;
+                font-weight:700;
+                color:#2e1065;
+                margin-bottom:6px;
+            ">Ticket draft ready</div>
+            <div style="
+                color:#5b4b8a;
+                font-size:14px;
+                line-height:1.45;
+                margin-bottom:2px;
+            ">We already filled what we can from the feed check. Open the draft to review, edit, and send it when ready.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    toggle_label = "Hide ClickUp draft" if editor_open else "Send to ClickUp for editing"
+    toggle_type = "secondary" if editor_open else "primary"
+    if st.button(toggle_label, key="toggle_clickup_draft", use_container_width=True, type=toggle_type):
+        st.session_state["clickup_editor_open"] = not editor_open
+        st.rerun()
+
+    if editor_open:
         with st.container(border=True):
             st.markdown(
                 """
@@ -982,7 +987,9 @@ with clickup_col:
                 unsafe_allow_html=True,
             )
 
-            st.link_button("Send to ClickUp", clickup_url, use_container_width=True)
+            send_col, spacer_col = st.columns([1, 1.4], gap="small")
+            with send_col:
+                st.link_button("Send to ClickUp", clickup_url, use_container_width=True)
             st.caption("The form opens with this draft attached. Review it there and submit.")
 
 # ---------- DETAILS ----------
