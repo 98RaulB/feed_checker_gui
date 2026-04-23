@@ -145,7 +145,7 @@ def show_issue_table(title: str, rows: List[Dict], sample_n: int):
         st.write("none")
         return
     with st.expander(f"Show first {min(sample_n, len(rows))}"):
-        st.dataframe(rows[:sample_n], use_container_width=True)
+        st.dataframe(rows[:sample_n], width="stretch")
 
 # ---------- Tag helpers ----------
 def localname(tag: str) -> str:
@@ -836,67 +836,20 @@ with summary_col:
 with clickup_col:
     editor_open = st.session_state.get("clickup_editor_open", False)
     with st.container(border=True):
-        st.markdown(
-            """
-            <div style="
-                display:inline-block;
-                padding:5px 10px;
-                border-radius:999px;
-                background:#ede9fe;
-                color:#6d28d9;
-                font-size:12px;
-                font-weight:700;
-                margin-bottom:6px;
-            ">CLICKUP</div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            "<div style='font-size:22px;font-weight:700;color:#2e1065;margin-bottom:6px;'>Ticket draft ready</div>",
-            unsafe_allow_html=True,
-        )
+        st.caption("CLICKUP")
+        st.subheader("Ticket Draft Ready")
         st.caption("We already filled what we can from the feed check. Open the draft to review, edit, and send it when ready.")
 
     toggle_label = "Hide ClickUp draft" if editor_open else "Send to ClickUp for editing"
     toggle_type = "secondary" if editor_open else "primary"
-    if st.button(toggle_label, key="toggle_clickup_draft", use_container_width=True, type=toggle_type):
+    if st.button(toggle_label, key="toggle_clickup_draft", width="stretch", type=toggle_type):
         st.session_state["clickup_editor_open"] = not editor_open
         st.rerun()
 
     if editor_open:
         with st.container(border=True):
-            st.markdown(
-                """
-                <div style="
-                    display:inline-block;
-                    padding:5px 10px;
-                    border-radius:999px;
-                    background:#ede9fe;
-                    color:#6d28d9;
-                    font-size:12px;
-                    font-weight:700;
-                    margin-bottom:10px;
-                ">CLICKUP DRAFT</div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                """
-                <div style="
-                    font-size:22px;
-                    font-weight:700;
-                    color:#2e1065;
-                    margin-bottom:6px;
-                ">Ready to send</div>
-                <div style="
-                    color:#5b4b8a;
-                    font-size:14px;
-                    line-height:1.45;
-                    margin-bottom:14px;
-                ">Review the draft, make any edits you want, then open ClickUp with everything prepared.</div>
-                """,
-                unsafe_allow_html=True,
-            )
+            st.caption("CLICKUP DRAFT")
+            st.write("Review the draft, make any edits you want, then open ClickUp with everything prepared.")
 
             draft_col1, draft_col2 = st.columns(2, gap="medium")
             with draft_col1:
@@ -945,35 +898,15 @@ with clickup_col:
             }
             clickup_url = make_clickup_url(clickup_payload)
 
-            st.markdown(
-                f"""
-                <div style="
-                    background:#f8f7ff;
-                    border:1px solid #ddd6fe;
-                    border-radius:14px;
-                    padding:12px 14px;
-                    margin:8px 0 14px 0;
-                ">
-                    <div style="
-                        font-size:12px;
-                        font-weight:700;
-                        letter-spacing:0.04em;
-                        text-transform:uppercase;
-                        color:#6d28d9;
-                        margin-bottom:6px;
-                    ">Detected from check</div>
-                    <div style="font-size:14px; color:#1f2937; line-height:1.5;">
-                        <strong>Transformation:</strong> {clickup_payload["detected_transformation"]}<br>
-                        <strong>Problem codes:</strong> {", ".join(problem_codes) if problem_codes else "none"}
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
+            st.info(
+                "Detected from check\n\n"
+                f"Transformation: {clickup_payload['detected_transformation']}\n\n"
+                f"Problem codes: {', '.join(problem_codes) if problem_codes else 'none'}"
             )
 
             send_col, spacer_col = st.columns([1, 1.4], gap="small")
             with send_col:
-                st.link_button("Send to ClickUp", clickup_url, use_container_width=True)
+                st.link_button("Send to ClickUp", clickup_url, width="stretch")
             st.caption("The form opens with this draft attached. Review it there and submit.")
 
 # ---------- DETAILS ----------
