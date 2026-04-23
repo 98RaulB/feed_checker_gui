@@ -6,7 +6,10 @@ from collections import defaultdict
 import os
 import gzip
 import tempfile
+import json
+import base64
 import streamlit as st
+from urllib.parse import urlparse
 
 # Shared rules/helpers from your feed_specs.py
 from feed_specs import (
@@ -50,6 +53,21 @@ st.caption("Auto mode for small vs large feeds; optional Sample mode to process 
 SMALL_SIZE_LIMIT = 30 * 1024 * 1024   # 30 MB → DOM; above this → streaming
 REQUEST_TIMEOUT = 120                 # seconds
 STREAM_CHUNK = 1 << 20                # 1 MB
+CLICKUP_FORM_URL = "https://forms.clickup.com/90151995362/f/2kyqmhz2-30675/FF5VMWEUZRGFU7QVFR"
+CLICKUP_COUNTRIES = ["CZ", "SK", "RO", "HU", "HR", "PL", "IT", "BG", "SI", "GR"]
+CLICKUP_FORMATS = ["CSV", "CENEO", "OTHER", "CENEJE", "GOOGLE", "LEGACY", "COMPARI", "SKROUTZ"]
+COUNTRY_BY_TLD = {
+    "cz": "CZ",
+    "sk": "SK",
+    "ro": "RO",
+    "hu": "HU",
+    "hr": "HR",
+    "pl": "PL",
+    "it": "IT",
+    "bg": "BG",
+    "si": "SI",
+    "gr": "GR",
+}
 
 # ---------- UI helpers ----------
 def verdict_row(label: str, ok: bool, warn: bool = False, extra: str = "") -> Tuple[str, str]:
@@ -111,6 +129,147 @@ def localnames_from_item_paths(spec_name: str) -> set[str]:
         if last:
             names.add(strip_ns(last))
     return names
+
+def _clean_host(host: str) -> str:
+    host = (host or "").lower().strip()
+    host = host.split("@")[-1].split(":")[0]
+    return host[4:] if host.startswith("www.") else host
+
+def infer_shop_name(source: str) -> str:
+    candidate = (source or "").strip()
+    if candidate.lower().startswith(("http://", "https://")):
+        host = _clean_host(urlparse(candidate).netloc)
+        if host:
+            parts = [p for p in host.split(".") if p]
+            if len(parts) >= 3 and parts[-2] in {"co", "com"}:
+                base = parts[-3]
+            elif len(parts) >= 2:
+                base = parts[-2]
+            else:
+                base = parts[0]
+            return re.sub(r"[-_]+", " ", base).strip().title()
+
+    filename = os.path.basename(candidate)
+    filename = re.sub(r"(\.xml)?(\.gz)?$", "", filename, flags=re.IGNORECASE)
+    return re.sub(r"[-_]+", " ", filename).strip().title()
+
+def infer_country(source_url: str) -> str:
+    if not source_url.lower().startswith(("http://", "https://")):
+        return ""
+    host = _clean_host(urlparse(source_url).netloc)
+    for tld, country in COUNTRY_BY_TLD.items():
+        if host.endswith(f".{tld}"):
+            return country
+    return ""
+
+def map_clickup_format(spec_name: str) -> str:
+    if spec_name.startswith("Google Merchant"):
+        return "GOOGLE"
+    if spec_name.startswith("Compari"):
+        return "COMPARI"
+    if spec_name.startswith("Skroutz"):
+        return "SKROUTZ"
+    if spec_name.startswith("Ceneo"):
+        return "CENEO"
+    if spec_name.startswith("Jeftinije") or spec_name.startswith("Ceneje.si"):
+        return "CENEJE"
+    if spec_name.startswith("Heureka"):
+        return "LEGACY"
+    return "OTHER"
+
+def build_problem_codes(
+    xml_ok: bool,
+    spec_name: str,
+    conv_required: bool,
+    missing_id_idx: List[int],
+    missing_link_idx: List[int],
+    missing_img_idx: List[int],
+    missing_avail_idx: List[int],
+    missing_price_idx: List[int],
+    bad_price_idx: List[int],
+    invalid_price_format_idx: List[int],
+    bad_url_idx: List[int],
+    bad_img_idx: List[int],
+    dup_id_pairs: List[Tuple[int, int, str]],
+    dup_link_pairs: List[Tuple[int, int, str]],
+) -> List[str]:
+    codes: List[str] = []
+    if not xml_ok:
+        codes.append("XML_INVALID")
+    if spec_name == "UNKNOWN":
+        codes.append("FORMAT_UNKNOWN")
+    elif conv_required:
+        codes.append("FORMAT_NEEDS_CONVERSION")
+    if missing_id_idx:
+        codes.append("MISSING_ID")
+    if missing_link_idx:
+        codes.append("MISSING_PRODUCT_URL")
+    if missing_img_idx:
+        codes.append("MISSING_PRIMARY_IMAGE")
+    if missing_avail_idx:
+        codes.append("MISSING_AVAILABILITY")
+    if missing_price_idx:
+        codes.append("MISSING_PRICE")
+    if bad_price_idx:
+        codes.append("INVALID_PRICE")
+    if invalid_price_format_idx:
+        codes.append("INVALID_PRICE_FORMAT")
+    if bad_url_idx or bad_img_idx:
+        codes.append("URL_ENCODING_ISSUES")
+    if dup_id_pairs:
+        codes.append("DUPLICATE_IDS")
+    if dup_link_pairs:
+        codes.append("DUPLICATE_PRODUCT_URLS")
+    return codes
+
+def build_problem_summary(
+    spec_name: str,
+    conv_required: bool,
+    conv_note: str,
+    missing_link_idx: List[int],
+    missing_img_idx: List[int],
+    missing_price_idx: List[int],
+    bad_price_idx: List[int],
+    invalid_price_format_idx: List[int],
+    bad_url_idx: List[int],
+    bad_img_idx: List[int],
+    dup_id_pairs: List[Tuple[int, int, str]],
+    dup_link_pairs: List[Tuple[int, int, str]],
+) -> str:
+    parts: List[str] = []
+
+    if spec_name == "UNKNOWN":
+        parts.append("Transformation could not be identified")
+    elif conv_required:
+        parts.append(conv_note or f"{spec_name} needs conversion before FAVI import")
+
+    if missing_link_idx:
+        parts.append(f"missing product URLs ({len(missing_link_idx)})")
+    if missing_img_idx:
+        parts.append(f"missing primary images ({len(missing_img_idx)})")
+    if missing_price_idx:
+        parts.append(f"missing prices ({len(missing_price_idx)})")
+    if bad_price_idx:
+        parts.append(f"invalid prices ({len(bad_price_idx)})")
+    if invalid_price_format_idx:
+        parts.append(f"price format issues ({len(invalid_price_format_idx)})")
+
+    url_issue_count = len(bad_url_idx) + len(bad_img_idx)
+    if url_issue_count:
+        parts.append(f"URLs needing encoding ({url_issue_count})")
+    if dup_id_pairs:
+        parts.append(f"duplicate IDs ({len(dup_id_pairs)})")
+    if dup_link_pairs:
+        parts.append(f"duplicate product URLs ({len(dup_link_pairs)})")
+
+    if not parts:
+        return "Feed checked successfully. No obvious issues were detected."
+    return "; ".join(parts[:5]).strip().rstrip(".") + "."
+
+def make_clickup_url(payload: Dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    token = base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"{CLICKUP_FORM_URL}#faviTicket={token}"
 
 # ---------- I/O helpers ----------
 def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> str:
@@ -584,6 +743,108 @@ elif not favi_compat:
     """)
 
 summarize(pass_fail)
+
+# ---------- CLICKUP DRAFT ----------
+problem_codes = build_problem_codes(
+    xml_ok=xml_ok,
+    spec_name=spec_name,
+    conv_required=conv_required,
+    missing_id_idx=missing_id_idx,
+    missing_link_idx=missing_link_idx,
+    missing_img_idx=missing_img_idx,
+    missing_avail_idx=missing_avail_idx,
+    missing_price_idx=missing_price_idx,
+    bad_price_idx=bad_price_idx,
+    invalid_price_format_idx=invalid_price_format_idx,
+    bad_url_idx=bad_url_idx,
+    bad_img_idx=bad_img_idx,
+    dup_id_pairs=dup_id_pairs,
+    dup_link_pairs=dup_link_pairs,
+)
+
+source_url = url.strip() if url.strip().lower().startswith(("http://", "https://")) else ""
+draft_defaults = {
+    "shop_name": infer_shop_name(source_url or src_label),
+    "country": infer_country(source_url),
+    "issue_request_crm": build_problem_summary(
+        spec_name=spec_name,
+        conv_required=conv_required,
+        conv_note=conv_note,
+        missing_link_idx=missing_link_idx,
+        missing_img_idx=missing_img_idx,
+        missing_price_idx=missing_price_idx,
+        bad_price_idx=bad_price_idx,
+        invalid_price_format_idx=invalid_price_format_idx,
+        bad_url_idx=bad_url_idx,
+        bad_img_idx=bad_img_idx,
+        dup_id_pairs=dup_id_pairs,
+        dup_link_pairs=dup_link_pairs,
+    ),
+    "input_xml_feed_url": source_url,
+    "input_feed_format": map_clickup_format(spec_name),
+}
+draft_seed = json.dumps(
+    {
+        "src_label": src_label,
+        "source_url": source_url,
+        "spec_name": spec_name,
+        "problem_codes": problem_codes,
+        "processed_items": processed_items,
+    },
+    sort_keys=True,
+)
+if st.session_state.get("clickup_draft_seed") != draft_seed:
+    for field_name, value in draft_defaults.items():
+        st.session_state[f"clickup_{field_name}"] = value
+    st.session_state["clickup_draft_seed"] = draft_seed
+
+st.markdown("---")
+st.subheader("ClickUp Draft")
+st.caption("The checker prepares a ticket draft from the feed results. You can edit everything before opening the ClickUp form.")
+
+draft_col1, draft_col2 = st.columns(2, gap="large")
+with draft_col1:
+    st.text_input("Shop name", key="clickup_shop_name")
+with draft_col2:
+    inferred_country = st.session_state.get("clickup_country", "")
+    st.selectbox(
+        "Country",
+        [""] + CLICKUP_COUNTRIES,
+        index=([""] + CLICKUP_COUNTRIES).index(inferred_country) if inferred_country in CLICKUP_COUNTRIES else 0,
+        key="clickup_country",
+    )
+
+st.text_area("Issue / request / CRM", key="clickup_issue_request_crm", height=140)
+
+draft_col3, draft_col4 = st.columns(2, gap="large")
+with draft_col3:
+    st.text_input("Input XML feed URL", key="clickup_input_xml_feed_url")
+with draft_col4:
+    inferred_format = st.session_state.get("clickup_input_feed_format", "OTHER")
+    st.selectbox(
+        "Input feed format",
+        CLICKUP_FORMATS,
+        index=CLICKUP_FORMATS.index(inferred_format) if inferred_format in CLICKUP_FORMATS else CLICKUP_FORMATS.index("OTHER"),
+        key="clickup_input_feed_format",
+    )
+
+clickup_payload = {
+    "shop_name": st.session_state.get("clickup_shop_name", "").strip(),
+    "country": st.session_state.get("clickup_country", "").strip(),
+    "issue_request_crm": st.session_state.get("clickup_issue_request_crm", "").strip(),
+    "input_xml_feed_url": st.session_state.get("clickup_input_xml_feed_url", "").strip(),
+    "input_feed_format": st.session_state.get("clickup_input_feed_format", "OTHER").strip() or "OTHER",
+    "detected_transformation": spec_name,
+    "source_label": src_label,
+    "problem_codes": problem_codes,
+}
+clickup_url = make_clickup_url(clickup_payload)
+
+st.link_button("Send to ClickUp", clickup_url)
+st.caption("If FAVI AM Tools is installed, the ClickUp form opens with this draft ready to autofill.")
+
+with st.expander("Payload preview"):
+    st.json(clickup_payload)
 
 # ---------- DETAILS ----------
 st.markdown("---")
