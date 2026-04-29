@@ -303,10 +303,17 @@ def make_clickup_url(payload: Dict[str, Any]) -> str:
     return f"{CLICKUP_FORM_URL}#faviTicket={token}"
 
 # ---------- I/O helpers ----------
+_DOWNLOAD_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; FeedChecker/1.0; +https://favi.com)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate",
+}
+
 def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> str:
     """Stream a URL to a temp file (no giant bytes in memory). Returns file path."""
     import requests
-    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers={"User-Agent":"FeedChecker/GUI"}) as r:
+    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers=_DOWNLOAD_HEADERS) as r:
         r.raise_for_status()
         ctype = r.headers.get("Content-Type","").lower()
         size_hdr = int(r.headers.get("Content-Length") or 0)
