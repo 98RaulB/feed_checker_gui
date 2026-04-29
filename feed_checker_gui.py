@@ -345,9 +345,9 @@ def persist_upload(up) -> str:
 def is_gzip_path(path: str) -> bool:
     try:
         with open(path, "rb") as f:
-            return f.read(2) == b"\x1f\x8b" or path.lower().endswith(".gz")
+            return f.read(2) == b"\x1f\x8b"
     except Exception:
-        return path.lower().endswith(".gz")
+        return False
 
 def open_maybe_gzip(path: str):
     return gzip.open(path, "rb") if is_gzip_path(path) else open(path, "rb")
@@ -593,7 +593,7 @@ def process_item(elem, index: int, spec: str):
 def run_dom_path() -> bool:
     global xml_ok, spec_name, total_items, processed_items
     try:
-        with open(src_path, "rb") as fh:
+        with open_maybe_gzip(src_path) as fh:
             xml_bytes = fh.read()
         root = ET.fromstring(xml_bytes)
         st.success("XML syntax: OK")
