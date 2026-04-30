@@ -386,7 +386,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "signature_tags": [
             "id","name","link","mainimage","image","price","brand","category","availability","description"
         ],
-        "expected_root_locals": ["items","products","shop"],
+        "expected_root_locals": ["cnjexport","items","products","shop"],
         "favi_compatible": True,
     },
 
