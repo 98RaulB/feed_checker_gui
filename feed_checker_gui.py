@@ -637,12 +637,6 @@ def run_stream_path(limit: int | None):
         processed = 0
         with open_maybe_gzip(src_path) as fh2:
             for elem, root in iter_items_stream(fh2, wanted_localnames=item_tags):
-                # Guard: count as item only if at least ID or Link exists for this spec
-                pid_peek = (read_id(elem, spec_name) or "").strip()
-                purl_peek = (read_link(elem, spec_name) or "").strip()
-                if not pid_peek and not purl_peek:
-                    continue
-
                 total_items += 1
 
                 if limit is not None and processed >= limit:
