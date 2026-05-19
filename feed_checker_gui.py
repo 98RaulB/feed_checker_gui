@@ -303,10 +303,17 @@ def make_clickup_url(payload: Dict[str, Any]) -> str:
     return f"{CLICKUP_FORM_URL}#faviTicket={token}"
 
 # ---------- I/O helpers ----------
+_DOWNLOAD_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; FeedChecker/1.0; +https://favi.com)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate",
+}
+
 def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> str:
     """Stream a URL to a temp file (no giant bytes in memory). Returns file path."""
     import requests
-    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers={"User-Agent":"FeedChecker/GUI"}) as r:
+    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers=_DOWNLOAD_HEADERS) as r:
         r.raise_for_status()
         ctype = r.headers.get("Content-Type","").lower()
         size_hdr = int(r.headers.get("Content-Length") or 0)
@@ -338,9 +345,9 @@ def persist_upload(up) -> str:
 def is_gzip_path(path: str) -> bool:
     try:
         with open(path, "rb") as f:
-            return f.read(2) == b"\x1f\x8b" or path.lower().endswith(".gz")
+            return f.read(2) == b"\x1f\x8b"
     except Exception:
-        return path.lower().endswith(".gz")
+        return False
 
 def open_maybe_gzip(path: str):
     return gzip.open(path, "rb") if is_gzip_path(path) else open(path, "rb")
@@ -586,7 +593,7 @@ def process_item(elem, index: int, spec: str):
 def run_dom_path() -> bool:
     global xml_ok, spec_name, total_items, processed_items
     try:
-        with open(src_path, "rb") as fh:
+        with open_maybe_gzip(src_path) as fh:
             xml_bytes = fh.read()
         root = ET.fromstring(xml_bytes)
         st.success("XML syntax: OK")
