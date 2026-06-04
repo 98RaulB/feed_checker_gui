@@ -149,7 +149,8 @@ def show_issue_table(title: str, rows: List[Dict], sample_n: int):
 
 # ---------- Tag helpers ----------
 def localname(tag: str) -> str:
-    return tag.split('}', 1)[1] if '}' in tag else tag
+    raw = tag.split('}', 1)[1] if '}' in tag else tag
+    return raw.lower()
 
 def localnames_from_item_paths(spec_name: str) -> set[str]:
     """Derive the set of valid item tag localnames from SPEC.item_paths for this spec."""
@@ -158,7 +159,7 @@ def localnames_from_item_paths(spec_name: str) -> set[str]:
     for p in paths:
         last = p.split("/")[-1].strip(".")  # e.g. "SHOPITEM", "{ns}entry", "product"
         if last:
-            names.add(strip_ns(last))
+            names.add(strip_ns(last).lower())
     return names
 
 def _clean_host(host: str) -> str:

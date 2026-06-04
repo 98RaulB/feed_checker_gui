@@ -346,15 +346,15 @@ SPEC: Dict[str, Dict[str, Any]] = {
     "Compari / Árukereső / Pazaruvaj (case-insensitive)": {
         "item_paths": [".//product"],
         "id_paths": ["./Identifier", "./identifier", "./ProductId", "./productid", "./id"],
-        "link_paths": ["./Product_url", "./product_url"],
-        "image_primary_paths": ["./Image_url", "./image_url"],
+        "link_paths": ["./Product_url", "./product_url", "./ProductUrl", "./producturl"],
+        "image_primary_paths": ["./Image_url", "./image_url", "./ImageUrl", "./imageurl"],
         "price_paths": ["./Price", "./price"],
         "required_fields": ["identifier|productid", "name", "product_url", "price", "image_url", "category", "description"],
         "availability_paths": ["./availability", "./in_stock", "./stock", "./availability_status", "./Delivery_time"],
         "availability_aliases": ["availability", "in_stock", "stock", "availability_status", "Delivery_time"],
         "signature_tags": [
-            "identifier","productid","name","product_url","price","old_price","image_url","category",
-            "category_full","manufacturer","description","delivery_time","stock","in_stock"
+            "identifier","productid","name","product_url","producturl","image_url","imageurl","category",
+            "category_full","manufacturer","description","delivery_time","deliverytime","stock","in_stock"
         ],
         "expected_root_locals": ["products"],
     },
