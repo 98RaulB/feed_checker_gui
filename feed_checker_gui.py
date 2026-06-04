@@ -620,16 +620,50 @@ def run_dom_path() -> bool:
         return False
 
 # ---------- Streaming path (Auto-large, any .gz, or Sample mode) ----------
+def _detect_spec_from_prefix(path: str, prefix_bytes: int = 65536) -> str:
+    """
+    Read a small prefix of the file into a mini-DOM for spec detection.
+    We wrap the snippet in a synthetic root if needed so ElementTree can parse it.
+    Falls back to root-tag-only detection if the snippet is not well-formed.
+    """
+    import io
+    with open_maybe_gzip(path) as fh:
+        raw = fh.read(prefix_bytes)
+    # Try full parse of the prefix (works if feed is tiny or prefix captures whole root)
+    try:
+        root = ET.fromstring(raw)
+        return detect_spec(root) or "UNKNOWN"
+    except ET.ParseError:
+        pass
+    # Prefix is incomplete XML — wrap it so we at least get the root + a few items
+    try:
+        # Close any open tags by appending a dummy close; won't be valid but gives
+        # us enough structure for iterparse to yield several start events.
+        context = ET.iterparse(io.BytesIO(raw), events=("start",))
+        root_elem = None
+        items_seen = 0
+        for _, elem in context:
+            if root_elem is None:
+                root_elem = elem
+            items_seen += 1
+            if items_seen >= 50:   # enough children for reliable detection
+                break
+        if root_elem is not None:
+            spec = detect_spec(root_elem)
+            if spec and spec.upper() != "UNKNOWN":
+                return spec
+    except Exception:
+        pass
+    return "UNKNOWN"
+
+
 def run_stream_path(limit: int | None):
     global xml_ok, spec_name, total_items, processed_items
     try:
-        # Quick root/spec detection
-        with open_maybe_gzip(src_path) as fh1:
-            context1 = ET.iterparse(fh1, events=("start",))
-            _, root_first = next(context1)
-            spec_name_local = detect_spec(root_first) or "UNKNOWN"
-            spec_name = spec_name_local
-            st.success("XML syntax: OK")
+        # Quick root/spec detection using a small prefix (captures root + a few items)
+        spec_name_local = _detect_spec_from_prefix(src_path)
+        spec_name = spec_name_local
+        st.success("XML syntax: OK")
 
         # Build exact set of item tag localnames from SPEC (no broad fallback for known specs)
         if spec_name and spec_name.upper() != "UNKNOWN":
