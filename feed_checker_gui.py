@@ -156,13 +156,18 @@ def unique_preserve(xs: List[str]) -> List[str]:
             out.append(x)
     return out
 
-def show_issue_table(title: str, rows: List[Dict], sample_n: int):
-    st.write(f"**{title}:** {len(rows)}")
-    if not rows:
-        st.write("none")
+MAX_ROWS = 1000   # cap rows rendered per issue list, to keep the page light
+
+def show_issue_table(title: str, rows: List[Dict]):
+    """Render an issue category as a collapsed, expandable list with its count
+    in the label. Renders nothing when empty, so a clean feed stays uncluttered."""
+    n = len(rows)
+    if n == 0:
         return
-    with st.expander(f"Show first {min(sample_n, len(rows))}"):
-        st.dataframe(rows[:sample_n], width="stretch")
+    with st.expander(f"{title} — {n}"):
+        st.dataframe(rows[:MAX_ROWS], width="stretch")
+        if n > MAX_ROWS:
+            st.caption(f"Showing the first {MAX_ROWS:,} of {n:,}.")
 
 # ---------- Tag helpers ----------
 def localname(tag: str) -> str:
@@ -462,23 +467,18 @@ def favi_price_format_flags(raw_text: str) -> Tuple[bool, bool, str]:
 
 # ---------- Form ----------
 with st.form("input"):
-    url = st.text_input("Feed URL (http/https)", placeholder="https://example.com/feed.xml")
+    url = st.text_input("Feed URL", placeholder="https://example.com/feed.xml")
     up = st.file_uploader("…or upload an XML file (.xml or .xml.gz)", type=["xml", "gz"])
 
-    colA, colB = st.columns(2)
-    with colA:
+    # Power-user knobs tucked away so the default flow is just paste-and-check.
+    with st.expander("Advanced options"):
         scope = st.selectbox("Processing scope", ["Auto (full)", "Sample first N items"])
-    with colB:
-        stop_on_first_parse_error = st.checkbox("Stop on XML parse error", value=True)
+        n_limit = None
+        if scope == "Sample first N items":
+            n_limit = st.number_input("Sample size (items)", min_value=100, max_value=200_000, value=5_000, step=500)
+        stop_on_first_parse_error = st.checkbox("Stop on first XML parse error", value=True)
 
-    # Show the N picker ONLY when Sample mode is chosen
-    n_limit = None
-    if scope == "Sample first N items":
-        n_limit = st.number_input("N (for sample mode)", min_value=100, max_value=200_000, value=5_000, step=500)
-
-    sample_show = st.number_input("Show up to N sample issues per category", 1, 50, 10)
-
-    submitted = st.form_submit_button("Check feed")
+    submitted = st.form_submit_button("Check feed", type="primary", use_container_width=True)
 
 if not submitted:
     st.markdown("© 2025 Raul Bertoldini")
@@ -889,46 +889,54 @@ with summary_col:
     summarize(pass_fail)
 
 # ---------- DETAILS ----------
-st.markdown("---")
-st.subheader("Details")
-
 def safe_get(lst, i, default=""):
     try:
         return lst[i]
     except Exception:
         return default
 
+has_detail_issues = any([
+    missing_id_idx, missing_link_idx, missing_img_idx, missing_avail_idx,
+    missing_price_idx, bad_price_idx, invalid_price_format_idx, overprecision_price_idx,
+    bad_url_idx, bad_img_idx, dup_id_pairs, dup_link_pairs,
+])
+st.markdown("---")
+if has_detail_issues:
+    st.subheader("Details")
+else:
+    st.success("No issues in the core checks — IDs, URLs, images, prices, and availability all look good.")
+
 # Missing fields
 missing_id_rows = [
     {"id": "(missing)", "link": safe_get(links, i), "image": "yes" if safe_get(images, i) else "no", "availability": safe_get(avails, i) or "(missing)"}
     for i in missing_id_idx
 ]
-show_issue_table("Missing ID (by example values)", missing_id_rows, sample_show)
+show_issue_table("Missing ID (by example values)", missing_id_rows)
 
 missing_link_rows = [
     {"id": safe_get(ids, i), "link": "(missing)", "image": "yes" if safe_get(images, i) else "no", "availability": safe_get(avails, i) or "(missing)"}
     for i in missing_link_idx if safe_get(ids, i)
 ]
-show_issue_table("Missing Product URL (by product ID)", missing_link_rows, sample_show)
+show_issue_table("Missing Product URL (by product ID)", missing_link_rows)
 
 missing_img_rows = [
     {"id": safe_get(ids, i), "link": safe_get(links, i), "primary_image": "(missing)"}
     for i in missing_img_idx if safe_get(ids, i)
 ]
-show_issue_table("Missing Primary Image (by product ID)", missing_img_rows, sample_show)
+show_issue_table("Missing Primary Image (by product ID)", missing_img_rows)
 
 missing_avail_rows = [
     {"id": safe_get(ids, i), "link": safe_get(links, i), "availability": "(missing)"}
     for i in missing_avail_idx if safe_get(ids, i)
 ]
-show_issue_table("Missing Availability (by product ID)", missing_avail_rows, sample_show)
+show_issue_table("Missing Availability (by product ID)", missing_avail_rows)
 
 # PRICE details
 missing_price_rows = [
     {"id": safe_get(ids, i) or "(missing id)", "link": safe_get(links, i), "raw_price": "(missing)"}
     for i in missing_price_idx if safe_get(ids, i)
 ]
-show_issue_table("Missing Price (by product ID)", missing_price_rows, sample_show)
+show_issue_table("Missing Price (by product ID)", missing_price_rows)
 
 bad_price_rows = [
     {"id": safe_get(ids, i) or "(missing id)",
@@ -938,7 +946,7 @@ bad_price_rows = [
     }
     for i in bad_price_idx
 ]
-show_issue_table("Invalid Price (non-numeric or <= 0) by product ID", bad_price_rows, sample_show)
+show_issue_table("Invalid Price (non-numeric or <= 0) by product ID", bad_price_rows)
 
 invalid_format_rows = [
     {"id": safe_get(ids, i) or "(missing id)",
@@ -947,7 +955,7 @@ invalid_format_rows = [
      "note": "Format not allowed by FAVI (dot-as-thousands/comma-as-thousands/etc.)"}
     for i in invalid_price_format_idx
 ]
-show_issue_table("Price format violations (FAVI rules)", invalid_format_rows, sample_show)
+show_issue_table("Price format violations (FAVI rules)", invalid_format_rows)
 
 overprecision_rows = [
     {"id": safe_get(ids, i) or "(missing id)",
@@ -956,13 +964,14 @@ overprecision_rows = [
      "note": "More than 2 decimals — FAVI rounds automatically"}
     for i in overprecision_price_idx
 ]
-show_issue_table("Price over-precision (> 2 decimals) informational", overprecision_rows, sample_show)
+show_issue_table("Price over-precision (> 2 decimals) informational", overprecision_rows)
 
-st.markdown("### URL Encoding Issues")
-st.warning(
-    "URLs with spaces or non-ASCII characters can cause feed rejection. "
-    "These should be percent-encoded. Your feed transformer should handle this automatically, but it is worth verifying the output."
-)
+if bad_url_idx or bad_img_idx:
+    st.markdown("### URL encoding issues")
+    st.warning(
+        "URLs with spaces or non-ASCII characters can cause feed rejection — they should be "
+        "percent-encoded. The feed transformer normally handles this, but it's worth verifying the output."
+    )
 
 bad_url_rows = [
     {"id": safe_get(ids, i) or "(missing id)", 
@@ -971,7 +980,7 @@ bad_url_rows = [
      "issue": "Non-ASCII chars" if not ascii_only.match(safe_get(raw_links, i)) else "Contains spaces"}
     for i in bad_url_idx
 ]
-show_issue_table("Product URLs requiring encoding", bad_url_rows, sample_show)
+show_issue_table("Product URLs requiring encoding", bad_url_rows)
 
 bad_img_rows = [
     {"id": safe_get(ids, i) or "(missing id)", 
@@ -980,7 +989,7 @@ bad_img_rows = [
      "issue": "Non-ASCII chars" if not ascii_only.match(safe_get(raw_imgs, i)) else "Contains spaces"}
     for i in bad_img_idx
 ]
-show_issue_table("Image URLs requiring encoding", bad_img_rows, sample_show)
+show_issue_table("Image URLs requiring encoding", bad_img_rows)
 
 # Duplicates (IDs)
 dup_ids_map: Dict[str, List[int]] = defaultdict(list)
@@ -997,7 +1006,7 @@ for pid, idxs in dup_ids_map.items():
         "example_links": " | ".join(ex_links) if ex_links else ""
     })
 dup_id_rows.sort(key=lambda r: (-r["occurrences"], r["id"]))
-show_issue_table("Duplicate IDs (grouped)", dup_id_rows, sample_show)
+show_issue_table("Duplicate IDs (grouped)", dup_id_rows)
 
 # Duplicates (URLs)
 url_to_ids: Dict[str, List[str]] = defaultdict(list)
@@ -1016,7 +1025,7 @@ for url, idlist in url_to_ids.items():
         "ids": ", ".join(ids_u[:12]) + (" …" if len(ids_u) > 12 else "")
     })
 dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"]))
-show_issue_table("Duplicate Product URLs (grouped, with IDs)", dup_url_rows, sample_show)
+show_issue_table("Duplicate Product URLs (grouped, with IDs)", dup_url_rows)
 
 # ---------- RECOMMENDED ELEMENTS ----------
 if RECOMMENDED_FIELDS:
@@ -1039,7 +1048,7 @@ if RECOMMENDED_FIELDS:
             {"id": safe_get(ids, i) or "(missing id)", "link": safe_get(links, i)}
             for i in miss
         ]
-        show_issue_table(f"Missing {f['label']} ({tag})", rec_rows, sample_show)
+        show_issue_table(f"Missing {f['label']} ({tag})", rec_rows)
     if not any_recommended_missing:
         st.success("All recommended elements are present on every item checked.")
 
