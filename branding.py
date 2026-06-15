@@ -65,8 +65,10 @@ _CSS = f"""
     padding-bottom: 3rem !important;
     padding-left: 1.75rem !important;
     padding-right: 1.75rem !important;
-    max-width: none !important;
+    max-width: 1200px !important;
     width: 100% !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
   }}
   @media (max-width: 640px) {{
     .block-container {{ padding-left: 1rem !important; padding-right: 1rem !important; }}
@@ -92,7 +94,7 @@ _CSS = f"""
     letter-spacing: -0.01em;
     line-height: 1.1;
     text-align: right;
-    margin: 0;
+    margin: 0 !important;
   }}
   @media (max-width: 640px) {{
     .favi-banner {{ flex-direction: column; align-items: flex-start; gap: 0.5rem; }}

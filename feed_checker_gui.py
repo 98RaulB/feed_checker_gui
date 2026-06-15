@@ -65,6 +65,10 @@ page_header(
     subtitle="Validate a product feed before FAVI import — detects the format, checks "
              "required fields and price formatting, and flags missing recommended elements.",
 )
+st.warning(
+    "🚧 **Beta** — the Feed Checker is still in beta. More fixes and new "
+    "functionality are coming soon."
+)
 
 # --------- Tuning ----------
 SMALL_SIZE_LIMIT = 30 * 1024 * 1024   # 30 MB → DOM; above this → streaming
@@ -87,18 +91,30 @@ COUNTRY_BY_TLD = {
 }
 
 # ---------- UI helpers ----------
-def verdict_row(label: str, ok: bool, warn: bool = False, extra: str = "") -> Tuple[str, str]:
-    if ok and not warn:
-        return (label, f"✅ PASS {extra}".strip())
-    if warn and ok:
-        return (label, f"⚠️ WARN {extra}".strip())
-    return (label, f"❌ FAIL {extra}".strip())
-
 def summarize(pass_fail: Dict[str, Tuple[bool, bool, str]]):
-    st.subheader("SUMMARY")
+    st.subheader("Summary")
+
+    fails, warns, passes = [], [], []
     for k, (ok, warn, extra) in pass_fail.items():
-        _, text = verdict_row(k, ok, warn, extra)
-        st.write(f"- **{k}**: {text}")
+        if not ok:
+            fails.append((k, extra))
+        elif warn:
+            warns.append((k, extra))
+        else:
+            passes.append((k, extra))
+
+    # Lead with what needs attention — errors first, then warnings.
+    if fails or warns:
+        lines = [f"- ❌ **{k}** {extra}".rstrip() for k, extra in fails]
+        lines += [f"- ⚠️ **{k}** {extra}".rstrip() for k, extra in warns]
+        st.markdown("\n".join(lines))
+    else:
+        st.success("No errors or warnings — everything checks out.")
+
+    # Everything that's fine is tucked into a dropdown to keep the view scannable.
+    if passes:
+        with st.expander(f"✅ Passing checks ({len(passes)})"):
+            st.markdown("\n".join(f"- ✅ **{k}** {extra}".rstrip() for k, extra in passes))
 
 def clickup_card_metric(label: str, value: str):
     safe_label = str(label).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
