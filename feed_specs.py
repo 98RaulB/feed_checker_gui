@@ -669,14 +669,14 @@ RECOMMENDED_FIELDS: List[Dict[str, Any]] = [
         "key": "category", "label": "Category", "required": True,
         "aliases": {
             "categorytext", "category", "categories", "category_full",
-            "cat", "google_product_category", "product_type",
+            "cat", "fileunder", "google_product_category", "product_type",
         },
     },
     {
         "key": "delivery", "label": "Delivery / shipping", "required": False,
         "aliases": {
-            "delivery", "shipping", "delivery_price",
-            "shipping_cost", "shipping_price",
+            "delivery", "shipping", "delivery_price", "delivery_cost",
+            "deliverycost", "shipping_cost", "shipping_price",
         },
     },
     {
@@ -685,7 +685,7 @@ RECOMMENDED_FIELDS: List[Dict[str, Any]] = [
     },
     {
         "key": "gtin", "label": "EAN / GTIN", "required": False,
-        "aliases": {"ean", "gtin", "gtin13", "gtin14", "ean13", "barcode"},
+        "aliases": {"ean", "gtin", "gtin13", "gtin14", "ean13", "ean_code", "barcode"},
     },
 ]
 
