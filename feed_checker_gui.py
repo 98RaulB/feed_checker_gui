@@ -412,20 +412,13 @@ def iter_items_stream(file_like, wanted_localnames: Iterable[str]):
 #  - "8000,70"       (comma decimals)
 #  - "8000.70"       (dot decimals; dot used ONLY as decimal separator)
 #
-# Not accepted:
-#  - "8.000" or "1.234,50" (dot as thousands)
-#  - "1,234.50"            (comma as thousands)
+# Flagged (a dot/comma is grouping thousands — FAVI wants spaces or nothing):
+#  - "1.234,50" / "1,234.50" (both a dot AND a comma present)
+#  - "1.234.567"             (same separator repeated)
 #  - More than 2 decimals  → warn: over-precision (will be rounded)
-_re_int_plain           = re.compile(r"^\d+$")
-_re_int_space_groups    = re.compile(r"^\d{1,3}(?: \d{3})+$")
-_re_dec_comma           = re.compile(r"^\d+(?:,\d+)$")
-_re_dec_dot             = re.compile(r"^\d+(?:\.\d+)$")
-_re_has_dot_thousands   = re.compile(r"\d\.\d{3}(?:[^\d]|$)")
-_re_has_comma_thousands = re.compile(r"\d,\d{3}(?:[^\d]|$)")
-
 def _extract_first_numeric_token(s: str) -> str:
     # capture the same token parse_price() would see, but keep punctuation to validate format
-    m = re.search(r"\d{1,3}(?:[ .,\u00A0]?\d{3})*(?:[.,]\d+)?|\d+(?:[.,]\d+)?", s)
+    m = re.search(r"\d{1,3}(?:[ .,\u00A0]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?", s)
     return m.group(0) if m else ""
 
 def favi_price_format_flags(raw_text: str) -> Tuple[bool, bool, str]:
@@ -441,32 +434,31 @@ def favi_price_format_flags(raw_text: str) -> Tuple[bool, bool, str]:
     if not token:
         return False, False, "no numeric token"
 
-    # Disallow dot/comma as thousands separators
-    if _re_has_dot_thousands.search(token):
-        return False, False, "dot used as thousands separator"
-    if _re_has_comma_thousands.search(token):
-        return False, False, "comma used as thousands separator"
+    has_dot = "." in token
+    has_comma = "," in token
 
-    # Allowed overall shapes
-    allowed = (
-        _re_int_plain.match(token)
-        or _re_int_space_groups.match(token)
-        or _re_dec_comma.match(token)
-        or _re_dec_dot.match(token)
-    )
-    if not allowed:
-        return False, False, "format not in {8000 | 8 000 | 8000,dd | 8000.dd}"
+    # Both present → a dot or comma is grouping thousands, which FAVI doesn't
+    # accept (use spaces, or nothing). A lone dot OR a lone comma is an
+    # unambiguous decimal separator and is fine.
+    if has_dot and has_comma:
+        return False, False, "uses both '.' and ',' — keep one decimal separator (spaces for thousands)"
 
-    # Over-precision (>2 decimals) → warn
-    overprecision = False
-    if "," in token:
-        dec = token.split(",", 1)[1]
-        overprecision = len(dec) > 2
-    elif "." in token:
-        dec = token.split(".", 1)[1]
-        overprecision = len(dec) > 2
+    core = token.replace(" ", "")  # spaces are thousands grouping; drop them
+    sep = "." if has_dot else ("," if has_comma else "")
 
-    return True, overprecision, ""
+    if sep:
+        # A decimal separator appears once; repeated means it's grouping
+        # thousands (e.g. "1.234.567").
+        if core.count(sep) > 1:
+            return False, False, f"'{sep}' used to group thousands — use spaces or nothing"
+        int_part, dec_part = core.split(sep)
+        if not int_part.isdigit() or not dec_part.isdigit():
+            return False, False, "not a numeric value"
+        return True, len(dec_part) > 2, ""
+
+    if not core.isdigit():
+        return False, False, "not a numeric value"
+    return True, False, ""
 
 # ---------- Form ----------
 with st.form("input"):

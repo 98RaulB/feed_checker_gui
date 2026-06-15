@@ -27,8 +27,12 @@ def read_link_raw(elem: ET.Element, spec_name: str) -> str:
 
 # ---------- PRICE HELPERS (no currency) ----------
 # Finds "1 234,50" / "1234.50" / "1234" / "1,234.50" etc.
+# The grouped-thousands alternative REQUIRES a separator between 3-digit groups;
+# otherwise a plain integer like "8000" matches "\d{1,3}" greedily ("800") and
+# the rest can't form a full group, truncating the value. With the separator
+# required, "8000" falls through to the plain-number alternative instead.
 _price_num_re = re.compile(
-    r"[-+]?\d{1,3}(?:[ .,\u00A0]?\d{3})*(?:[.,]\d+)?|[-+]?\d+(?:[.,]\d+)?"
+    r"[-+]?\d{1,3}(?:[ .,\u00A0]\d{3})+(?:[.,]\d+)?|[-+]?\d+(?:[.,]\d+)?"
 )
 
 def _normalize_amount(txt: str) -> float | None:
