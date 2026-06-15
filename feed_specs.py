@@ -642,3 +642,79 @@ def needs_conversion(spec_name: str) -> Tuple[bool, str]:
         note = spec.get("conversion_note", "Conversion required for FAVI compatibility")
         return True, note
     return False, ""
+
+
+# -------------------- Recommended / content elements --------------------
+# FAVI documents these element requirements at
+# help.favionline.com/en/meanings-and-requirements-for-individual-elements.
+# The core checker validates ID / URL / image / availability / price; these
+# are the *other* elements FAVI cares about. `required=True` marks elements
+# FAVI lists as mandatory for its native format; the rest are recommended
+# (they improve listing quality and conversions).
+#
+# Detection is alias-based over each item's direct-child tag localnames and
+# its attribute names — deliberately spec-agnostic, so it works for every
+# format in SPEC (element- and attribute-based alike) without enumerating
+# exact XPaths per spec. Aliases are matched case-insensitively.
+RECOMMENDED_FIELDS: List[Dict[str, Any]] = [
+    {
+        "key": "title", "label": "Product name", "required": True,
+        "aliases": {"title", "productname", "product_name", "name"},
+    },
+    {
+        "key": "description", "label": "Description", "required": True,
+        "aliases": {"description", "desc"},
+    },
+    {
+        "key": "category", "label": "Category", "required": True,
+        "aliases": {
+            "categorytext", "category", "categories", "category_full",
+            "cat", "google_product_category", "product_type",
+        },
+    },
+    {
+        "key": "delivery", "label": "Delivery / shipping", "required": False,
+        "aliases": {
+            "delivery", "shipping", "delivery_price",
+            "shipping_cost", "shipping_price",
+        },
+    },
+    {
+        "key": "brand", "label": "Manufacturer / brand", "required": False,
+        "aliases": {"manufacturer", "brand", "producer", "vendor"},
+    },
+    {
+        "key": "gtin", "label": "EAN / GTIN", "required": False,
+        "aliases": {"ean", "gtin", "gtin13", "gtin14", "ean13", "barcode"},
+    },
+]
+
+
+def _present_value_localnames(elem: ET.Element) -> set[str]:
+    """Localnames (lowercased) that carry a value on this item element.
+
+    A direct child counts when it has non-empty text, sub-children (container
+    elements such as Heureka <DELIVERY> or Google <g:shipping>), or its own
+    attributes. Item attributes with a non-empty value count too — this is how
+    attribute-based specs (Ceneje.si, Ceneo) expose their fields.
+    """
+    present: set[str] = set()
+    for child in list(elem):
+        if not isinstance(child.tag, str):
+            continue
+        if (child.text or "").strip() or len(child) > 0 or child.attrib:
+            present.add(strip_ns(child.tag).lower())
+    for k, v in (elem.attrib or {}).items():
+        if (v or "").strip():
+            present.add(str(k).lower())
+    return present
+
+
+def present_recommended_fields(elem: ET.Element) -> set[str]:
+    """Return the set of RECOMMENDED_FIELDS keys present (non-empty) on this item."""
+    present_locals = _present_value_localnames(elem)
+    return {
+        field["key"]
+        for field in RECOMMENDED_FIELDS
+        if present_locals & field["aliases"]
+    }

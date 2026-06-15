@@ -39,15 +39,32 @@ except Exception:
     def needs_conversion(spec_name: str) -> tuple[bool, str]:
         return (False, "")
 
+# Recommended-element coverage (description, category, delivery/shipping, …).
+# Falls back to a no-op if feed_specs hasn't been updated on this deployment.
+try:
+    from feed_specs import RECOMMENDED_FIELDS, present_recommended_fields
+except Exception:
+    RECOMMENDED_FIELDS = []
+
+    def present_recommended_fields(elem) -> set:
+        return set()
+
+# Shared FAVI look-and-feel (Work Sans, crimson banner, themed cards/pills).
+from branding import inject_css, page_header, render_metric_row, FAVICON_URL
+
 # Safe XML parsing (defusedxml if present)
 try:
     from defusedxml import ElementTree as ET  # type: ignore
 except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
-st.set_page_config(page_title="FAVI Feed Checker", layout="wide")
-st.title("FAVI Feed Checker")
-st.caption("Auto mode for small vs large feeds; optional Sample mode to process only the first N items (streaming & low RAM).")
+st.set_page_config(page_title="FAVI Feed Checker", page_icon=FAVICON_URL, layout="wide")
+inject_css()
+page_header(
+    "Feed Checker",
+    subtitle="Validate a product feed before FAVI import — detects the format, checks "
+             "required fields and price formatting, and flags missing recommended elements.",
+)
 
 # --------- Tuning ----------
 SMALL_SIZE_LIMIT = 30 * 1024 * 1024   # 30 MB → DOM; above this → streaming
@@ -110,22 +127,6 @@ def clickup_card_metric(label: str, value: str):
                 word-break:break-word;
             ">{safe_value}</div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-def status_pill(text: str, color: str = "#16a34a"):  # green default
-    st.markdown(
-        f"""
-        <div style="
-            display:inline-block;
-            padding:6px 12px;
-            border-radius:999px;
-            background:{color};
-            color:white;
-            font-weight:600;
-            font-size:14px;
-        ">{text}</div>
         """,
         unsafe_allow_html=True,
     )
@@ -224,6 +225,7 @@ def build_problem_codes(
     bad_img_idx: List[int],
     dup_id_pairs: List[Tuple[int, int, str]],
     dup_link_pairs: List[Tuple[int, int, str]],
+    recommended_missing: Dict[str, List[int]] | None = None,
 ) -> List[str]:
     codes: List[str] = []
     if not xml_ok:
@@ -252,6 +254,11 @@ def build_problem_codes(
         codes.append("DUPLICATE_IDS")
     if dup_link_pairs:
         codes.append("DUPLICATE_PRODUCT_URLS")
+    if recommended_missing:
+        if recommended_missing.get("description"):
+            codes.append("MISSING_DESCRIPTION")
+        if recommended_missing.get("delivery"):
+            codes.append("MISSING_DELIVERY")
     return codes
 
 def build_problem_summary(
@@ -514,6 +521,11 @@ missing_link_idx: List[int] = []
 missing_img_idx: List[int] = []
 missing_avail_idx: List[int] = []
 
+# Recommended / content elements (description, category, delivery/shipping, …):
+# per-field index lists, plus the set of items missing at least one.
+recommended_missing: Dict[str, List[int]] = {f["key"]: [] for f in RECOMMENDED_FIELDS}
+recommended_gap_idx: List[int] = []
+
 # PRICE issue indexes (semantic + format)
 missing_price_idx: List[int] = []          # no price node/text
 bad_price_idx: List[int] = []              # present but unparseable or <= 0
@@ -556,6 +568,17 @@ def process_item(elem, index: int, spec: str):
     if not purl: missing_link_idx.append(index)
     if not pimg: missing_img_idx.append(index)
     if not pav:  missing_avail_idx.append(index)
+
+    # Recommended / content elements (FAVI-documented; non-blocking)
+    if RECOMMENDED_FIELDS:
+        present_rec = present_recommended_fields(elem)
+        missing_any = False
+        for f in RECOMMENDED_FIELDS:
+            if f["key"] not in present_rec:
+                recommended_missing[f["key"]].append(index)
+                missing_any = True
+        if missing_any:
+            recommended_gap_idx.append(index)
 
     # PRICE validations (semantic)
     if (raw_price or "").strip() == "":
@@ -714,43 +737,22 @@ else:
 
 # ---------- TOP ROW ----------
 st.markdown("---")
-c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1], gap="large")
 
-with c1:
-    status_pill(f"Transformation: {spec_name if spec_name!='UNKNOWN' else 'UNKNOWN'}",
-                "#16a34a" if spec_name!="UNKNOWN" else "#6b7280")
+total_dups = len(dup_id_pairs) + len(dup_link_pairs)
+url_issues = len(bad_url_idx) + len(bad_img_idx)
+items_value = f"{processed_items} / {total_items}" if use_sample_mode else f"{total_items}"
+short_format = spec_name.split(" (")[0].split(" / ")[0].strip() if spec_name != "UNKNOWN" else "UNKNOWN"
 
-with c2:
-    if use_sample_mode:
-        status_pill(f"Items: {processed_items} / {total_items}", "#16a34a")
-    else:
-        status_pill(f"Items: {total_items}", "#16a34a")
-
-with c3:
-    total_dups = len(dup_id_pairs) + len(dup_link_pairs)
-    status_pill(f"Duplicates: {total_dups}", "#dc2626" if total_dups > 0 else "#16a34a")
-
-with c4:
-    status_pill(f"Missing IDs: {len(missing_id_idx)}", "#dc2626" if len(missing_id_idx)>0 else "#16a34a")
-
-with c5:
-    url_issues = len(bad_url_idx) + len(bad_img_idx)
-    other_warnings = (
-        len(missing_link_idx)
-        + len(missing_img_idx)
-        + len(missing_avail_idx)
-        + len(missing_price_idx)
-        + len(bad_price_idx)
-        + len(invalid_price_format_idx)
-        + len(overprecision_price_idx)
-    )
-
-    if url_issues > 0:
-        status_pill(f"URL issues: {url_issues}", "#dc2626")
-    elif other_warnings > 0:
-        status_pill(f"Warnings: {other_warnings}", "#f59e0b")
-    else:
-        status_pill("No issues", "#16a34a")
+render_metric_row([
+    ("Format", short_format, "brand" if spec_name != "UNKNOWN" else "muted"),
+    ("Items", items_value, "default"),
+    ("Duplicates", total_dups, "error" if total_dups > 0 else "ok"),
+    ("Missing IDs", len(missing_id_idx), "error" if missing_id_idx else "ok"),
+    ("URL issues", url_issues, "error" if url_issues > 0 else "ok"),
+    ("Recommended gaps", len(recommended_gap_idx),
+     "warn" if recommended_gap_idx else "ok",
+     "items missing ≥1 element" if recommended_gap_idx else None),
+])
 
 # ---------- SUMMARY ----------
 pass_fail: Dict[str, Tuple[bool, bool, str]] = {}
@@ -780,6 +782,14 @@ pass_fail["Price format follows FAVI rules"] = (True, len(invalid_price_format_i
                                                f"(invalid format: {len(invalid_price_format_idx)})")
 pass_fail["Price precision (<= 2 decimals)"] = (True, len(overprecision_price_idx) > 0,
                                                f"(over-precision: {len(overprecision_price_idx)})")
+
+# Recommended / content elements (all WARN — never FAIL)
+for _f in RECOMMENDED_FIELDS:
+    _miss = recommended_missing.get(_f["key"], [])
+    _tag = "FAVI required" if _f["required"] else "recommended"
+    pass_fail[f"{_f['label']} present ({_tag})"] = (
+        True, len(_miss) > 0, f"(missing: {len(_miss)})"
+    )
 
 # Check FAVI compatibility
 favi_compat = is_favi_compatible(spec_name)
@@ -825,6 +835,7 @@ problem_codes = build_problem_codes(
     bad_img_idx=bad_img_idx,
     dup_id_pairs=dup_id_pairs,
     dup_link_pairs=dup_link_pairs,
+    recommended_missing=recommended_missing,
 )
 
 source_url = url.strip() if url.strip().lower().startswith(("http://", "https://")) else ""
@@ -998,6 +1009,31 @@ for url, idlist in url_to_ids.items():
     })
 dup_url_rows.sort(key=lambda r: (-r["num_ids"], r["url"]))
 show_issue_table("Duplicate Product URLs (grouped, with IDs)", dup_url_rows, sample_show)
+
+# ---------- RECOMMENDED ELEMENTS ----------
+if RECOMMENDED_FIELDS:
+    st.markdown("---")
+    st.subheader("Recommended elements")
+    st.caption(
+        "Beyond the core ID/URL/image/price checks, FAVI documents these element "
+        "requirements at help.favionline.com/en/meanings-and-requirements-for-individual-elements. "
+        "Items below are missing the element — '(FAVI required)' ones are mandatory for FAVI's "
+        "native format, the rest are recommended to improve listing quality and conversions."
+    )
+    any_recommended_missing = False
+    for f in RECOMMENDED_FIELDS:
+        miss = recommended_missing.get(f["key"], [])
+        if not miss:
+            continue
+        any_recommended_missing = True
+        tag = "FAVI required" if f["required"] else "recommended"
+        rec_rows = [
+            {"id": safe_get(ids, i) or "(missing id)", "link": safe_get(links, i)}
+            for i in miss
+        ]
+        show_issue_table(f"Missing {f['label']} ({tag})", rec_rows, sample_show)
+    if not any_recommended_missing:
+        st.success("All recommended elements are present on every item checked.")
 
 st.markdown("---")
 st.caption(
