@@ -472,7 +472,9 @@ def detect_spec(root: ET.Element) -> str:
 
     # CENEO: <o> anywhere
     if _exists(root, ".//o") or _exists_local(root, "o"):
-        sample = root.find(".//o") or _first_local(root, "o")
+        sample = root.find(".//o")
+        if sample is None:
+            sample = _first_local(root, "o")
         if sample is not None:
             attr_names = _attr_names(sample)
             child_names = _child_localnames(sample)
@@ -484,7 +486,9 @@ def detect_spec(root: ET.Element) -> str:
     # CENEJE / JEFTINIJE: <Item> or <item> anywhere
     # Distinguish between attribute-based (Ceneje.si) and element-based (Jeftinije)
     if _exists(root, ".//Item") or _exists_local(root, "item"):
-        sample = root.find(".//Item") or _first_local(root, "item")
+        sample = root.find(".//Item")
+        if sample is None:
+            sample = _first_local(root, "item")
         if sample is not None:
             child_names = _child_localnames(sample)
             attr_names = _attr_names(sample)
@@ -518,7 +522,9 @@ def detect_spec(root: ET.Element) -> str:
 
     # Compari / Skroutz: look for <product>. Skroutz has price_with_vat.
     if _exists(root, ".//product") or _exists_local(root, "product"):
-        sample = root.find(".//product", namespaces=NS) or _first_local(root, "product")
+        sample = root.find(".//product", namespaces=NS)
+        if sample is None:
+            sample = _first_local(root, "product")
         if sample is not None:
             child_names = _child_localnames(sample)
 
@@ -606,6 +612,41 @@ def read_link(elem: ET.Element, spec_name: str) -> str:
     val = _first(elem, SPEC.get(spec_name, {}).get("link_paths", []))
     return percent_encode_url(val) if val else ""
 
+def _value_by_localname_ci(elem: ET.Element, aliases: List[str]) -> str:
+    """Case-insensitive value lookup by child/attribute localname.
+
+    Returns the value of the first direct child (or item attribute) whose
+    localname equals one of `aliases`, compared case-insensitively. Aliases are
+    tried in order, so a spec's preferred field still wins. This tolerates
+    tag-casing drift in real feeds — e.g. a ProductsUp export emitting
+    <Delivery_Time> when the Compari spec's availability_paths only list the
+    case-sensitive ./Delivery_time / ./DeliveryTime / ./deliverytime, which
+    ElementTree.find() would never match.
+    """
+    if not aliases:
+        return ""
+    child_vals: Dict[str, str] = {}
+    for child in list(elem):
+        if not isinstance(child.tag, str):
+            continue
+        local = strip_ns(child.tag).lower()
+        txt = (child.text or "").strip()
+        if txt and local not in child_vals:
+            child_vals[local] = txt
+    attr_vals: Dict[str, str] = {
+        str(k).lower(): (v or "").strip()
+        for k, v in (elem.attrib or {}).items()
+        if (v or "").strip()
+    }
+    for alias in aliases:
+        key = alias.lower()
+        if child_vals.get(key):
+            return child_vals[key]
+        if attr_vals.get(key):
+            return attr_vals[key]
+    return ""
+
+
 def read_availability(elem: ET.Element, spec_name: str) -> str:
     # First try explicit availability paths
     paths = SPEC.get(spec_name, {}).get("availability_paths", [])
@@ -618,7 +659,14 @@ def read_availability(elem: ET.Element, spec_name: str) -> str:
         dd = _first(elem, ["./DELIVERY_DATE"])
         if dd and dd.isdigit() and int(dd) < 3:
             return "in stock"
-    return ""
+
+    # Case-insensitive fallback. The availability_paths above are matched by
+    # ElementTree.find(), which is case-sensitive, so a one-letter casing
+    # difference (feed's <Delivery_Time> vs spec's ./Delivery_time) reads as
+    # "missing" even though the spec name promises case-insensitivity. Fall
+    # back to matching availability_aliases by localname so casing drift in
+    # real feeds doesn't produce false "missing availability" reports.
+    return _value_by_localname_ci(elem, SPEC.get(spec_name, {}).get("availability_aliases", []))
 
 def required_fields(spec_name: str) -> List[str]:
     return SPEC.get(spec_name, {}).get("required_fields", [])
