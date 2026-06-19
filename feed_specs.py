@@ -23,7 +23,7 @@ def strip_ns(tag: str) -> str:
 
 # ---- RAW versions for validation (no percent-encoding) ----
 def read_link_raw(elem: ET.Element, spec_name: str) -> str:
-    return _first(elem, SPEC.get(spec_name, {}).get("link_paths", []))
+    return _read_first_ci(elem, SPEC.get(spec_name, {}).get("link_paths", []))
 
 # ---------- PRICE HELPERS (no currency) ----------
 # Finds "1 234,50" / "1234.50" / "1234" / "1,234.50" etc.
@@ -97,7 +97,10 @@ def read_price_text(elem: ET.Element, spec_name: str) -> str:
         a = (node.get("amount") or "").strip()
         if a:
             return a
-    return ""
+
+    # Case-insensitive fallback (e.g. feed uses <PRICE> where the spec lists
+    # ./price / ./Price). Last resort, after exact paths and amount-attr nodes.
+    return _value_by_localname_ci(elem, _aliases_from_paths(paths + fallback_paths))
 
 def read_price(elem: ET.Element, spec_name: str) -> tuple[float | None, str]:
     """
@@ -131,7 +134,7 @@ def _looks_like_google_without_ns(root: ET.Element) -> bool:
 
 def gather_primary_image_raw(elem: ET.Element, spec_name: str) -> str:
     paths = SPEC.get(spec_name, {}).get("image_primary_paths", [])
-    return _first(elem, paths) if paths else ""
+    return _read_first_ci(elem, paths)
 
 def _exists_local(root: ET.Element, localname: str) -> bool:
     lname = localname.lower()
@@ -557,7 +560,7 @@ def detect_spec(root: ET.Element) -> str:
 # -------------------- Shared image & field accessors --------------------
 def gather_primary_image(elem: ET.Element, spec_name: str, do_percent_encode: bool = True) -> str:
     paths = SPEC.get(spec_name, {}).get("image_primary_paths", [])
-    prim = _first(elem, paths) if paths else ""
+    prim = _read_first_ci(elem, paths)
     if do_percent_encode and prim:
         prim = percent_encode_url(prim)
     return prim
@@ -568,6 +571,8 @@ def gather_gallery(elem: ET.Element, spec_name: str, do_percent_encode: bool = T
     """
     paths = SPEC.get(spec_name, {}).get("image_gallery_paths", [])
     out: List[str] = _all(elem, paths) if paths else []
+    if not out and paths:
+        out = _values_by_localname_ci(elem, _aliases_from_paths(paths))
     if do_percent_encode:
         out = [percent_encode_url(u) for u in out if u]
     # de-dup & keep order
@@ -606,10 +611,10 @@ def get_item_nodes(root: ET.Element, spec_name: str) -> List[ET.Element]:
     return out
 
 def read_id(elem: ET.Element, spec_name: str) -> str:
-    return _first(elem, SPEC.get(spec_name, {}).get("id_paths", []))
+    return _read_first_ci(elem, SPEC.get(spec_name, {}).get("id_paths", []))
 
 def read_link(elem: ET.Element, spec_name: str) -> str:
-    val = _first(elem, SPEC.get(spec_name, {}).get("link_paths", []))
+    val = _read_first_ci(elem, SPEC.get(spec_name, {}).get("link_paths", []))
     return percent_encode_url(val) if val else ""
 
 def _value_by_localname_ci(elem: ET.Element, aliases: List[str]) -> str:
@@ -645,6 +650,68 @@ def _value_by_localname_ci(elem: ET.Element, aliases: List[str]) -> str:
         if attr_vals.get(key):
             return attr_vals[key]
     return ""
+
+
+def _values_by_localname_ci(elem: ET.Element, aliases: List[str]) -> List[str]:
+    """All direct-child text values whose localname matches one of `aliases`
+    (case-insensitive). Multi-value sibling of _value_by_localname_ci, for
+    gallery image lists."""
+    if not aliases:
+        return []
+    wanted = {a.lower() for a in aliases}
+    out: List[str] = []
+    for child in list(elem):
+        if isinstance(child.tag, str) and strip_ns(child.tag).lower() in wanted:
+            txt = (child.text or "").strip()
+            if txt:
+                out.append(txt)
+    return out
+
+
+def _alias_from_simple_path(path: str) -> str | None:
+    """Localname implied by a *simple* SPEC path: a direct child (./name,
+    ./{ns}name, ./pfx:name) or an item attribute (@name). Returns None for
+    nested or predicated paths (e.g. ./imgs/main/@url) that a flat localname
+    match can't resolve, so we never derive a misleading alias from them."""
+    p = path.strip()
+    if not p:
+        return None
+    if p.startswith("@"):
+        p = p[1:]
+        return p.lower() if p and "/" not in p else None
+    if p.startswith("./"):
+        p = p[2:]
+    if not p or "/" in p or "[" in p or "@" in p:
+        return None
+    p = strip_ns(p)
+    if ":" in p:
+        p = p.split(":", 1)[1]
+    return p.lower() or None
+
+
+def _aliases_from_paths(paths: List[str]) -> List[str]:
+    """Deduped localnames derived from a spec's *_paths, used as the
+    case-insensitive fallback set. Every field reuses the same casing /
+    namespace-prefix tolerance without a separately hand-maintained alias list."""
+    out: List[str] = []
+    seen = set()
+    for p in paths:
+        a = _alias_from_simple_path(p)
+        if a and a not in seen:
+            seen.add(a)
+            out.append(a)
+    return out
+
+
+def _read_first_ci(elem: ET.Element, paths: List[str]) -> str:
+    """Exact-path read with a case-insensitive localname fallback derived from
+    the same paths. The fallback fires only when the exact (case-sensitive)
+    XPaths miss, so it can only turn a false 'missing' into the real value — it
+    never overrides a successful exact match."""
+    val = _first(elem, paths) if paths else ""
+    if val:
+        return val
+    return _value_by_localname_ci(elem, _aliases_from_paths(paths))
 
 
 def read_availability(elem: ET.Element, spec_name: str) -> str:

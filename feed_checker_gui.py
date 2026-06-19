@@ -651,7 +651,7 @@ def run_dom_path() -> bool:
         return False
 
 # ---------- Streaming path (Auto-large, any .gz, or Sample mode) ----------
-def _detect_spec_from_prefix(path: str, prefix_bytes: int = 65536) -> str:
+def _detect_spec_from_prefix(path: str, prefix_bytes: int = 262144) -> str:
     """
     Read a small prefix of the file into a mini-DOM for spec detection.
     We wrap the snippet in a synthetic root if needed so ElementTree can parse it.
@@ -677,7 +677,7 @@ def _detect_spec_from_prefix(path: str, prefix_bytes: int = 65536) -> str:
             if root_elem is None:
                 root_elem = elem
             items_seen += 1
-            if items_seen >= 50:   # enough children for reliable detection
+            if items_seen >= 200:   # enough children for reliable detection
                 break
         if root_elem is not None:
             spec = detect_spec(root_elem)
