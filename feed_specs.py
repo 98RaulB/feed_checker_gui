@@ -118,9 +118,13 @@ def _looks_like_google_without_ns(root: ET.Element) -> bool:
         root_xml = b""
     if b"base.google.com/ns/1.0" in root_xml:
         return False
-    if strip_ns(root.tag).lower() != "rss":
-        return False
-
+    # Google Shopping without the g: namespace ships in more than one wrapper:
+    # the canonical <rss><channel>, but also a bare <items> root (Channable
+    # exports, e.g. vidaXL.cz). Don't gate on the root tag — the item-level
+    # field signature below (id+link+image_link, all Google-specific) is the
+    # real discriminator, and it keeps marketplace formats out: Jeftinije uses
+    # <Item> with <mainImage>/<slikaVelika>, Ceneo <o>, Heureka <SHOPITEM> —
+    # none carry an <image_link> child, so none satisfy `core` below.
     items = root.findall(".//item")[:5]  # look at up to 5 items
     if not items:
         return False
@@ -300,7 +304,9 @@ SPEC: Dict[str, Dict[str, Any]] = {
             "title","description","link","id","image_link","price","availability",
             "brand","mpn","gtin","condition","google_product_category","product_type","shipping"
         ],
-        "expected_root_locals": ["rss"],
+        # no-namespace Google arrives under <rss><channel>, a bare <items> root
+        # (Channable exports), or a lone <channel> — all carry <item> children.
+        "expected_root_locals": ["rss", "items", "channel"],
         "required_ns_fragments": [],
     },
 

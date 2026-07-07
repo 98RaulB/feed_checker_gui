@@ -153,5 +153,56 @@ class FieldCasingMatrixTest(unittest.TestCase):
         self.assertEqual(fs.read_price(item, spec), (None, ""))
 
 
+class GoogleNoNamespaceRootTest(unittest.TestCase):
+    """Google Shopping feeds without the g: namespace must be detected as
+    Google regardless of the wrapper root — including the bare <items> root
+    used by Channable exports (vidaXL.cz), which used to be mislabeled as
+    Jeftinije because the Jeftinije spec also claims the <items> root."""
+
+    GOOGLE = "Google Merchant (no-namespace) RSS"
+    JEFTINIJE = "Jeftinije / Ceneje (element-based)"
+
+    def _spec(self, xml):
+        return fs.detect_spec(ET.fromstring(xml))
+
+    def test_channable_items_root_detects_google(self):
+        # Real shape served by files.channable.com for vidaXL.cz: <items> root,
+        # lowercase <item>, Google field names, no g: namespace.
+        xml = ("<items><item>"
+               "<id>143046</id>"
+               "<title>vidaXL Ram</title>"
+               "<description>d</description>"
+               "<link>https://www.vidaxl.cz/e/p/8718475623502.html</link>"
+               "<image_link>https://vdxl.im/x.jpg</image_link>"
+               "<price>5426.00</price>"
+               "<availability>in stock</availability>"
+               "<brand>vidaXL</brand>"
+               "<gtin>8718475623502</gtin>"
+               "<google_product_category>Home &amp; Garden</google_product_category>"
+               "</item></items>")
+        self.assertEqual(self._spec(xml), self.GOOGLE)
+
+    def test_canonical_rss_root_still_detects_google(self):
+        # The original <rss><channel> no-namespace wrapper must keep working.
+        xml = ('<rss version="2.0"><channel><item>'
+               "<id>1</id><title>t</title><description>d</description>"
+               "<link>http://e/p</link><image_link>http://e/i.jpg</image_link>"
+               "<price>9.00</price><availability>in stock</availability>"
+               "</item></channel></rss>")
+        self.assertEqual(self._spec(xml), self.GOOGLE)
+
+    def test_jeftinije_items_root_still_detects_jeftinije(self):
+        # Regression guard: a genuine Jeftinije/Ceneje element-based feed also
+        # uses an <items> root, but with <Item> children and <image> (not the
+        # Google-specific <image_link>). It must NOT be stolen by the loosened
+        # Google detector.
+        xml = ("<items><Item>"
+               "<id>1</id><name>n</name>"
+               "<link>http://e/p</link><image>http://e/i.jpg</image>"
+               "<price>10</price><availability>in stock</availability>"
+               "</Item></items>")
+        self.assertEqual(self._spec(xml), self.JEFTINIJE)
+
+
 if __name__ == "__main__":
     unittest.main()
