@@ -969,8 +969,7 @@ show_issue_table("Price over-precision (> 2 decimals) informational", overprecis
 if bad_url_idx or bad_img_idx:
     st.markdown("### URL encoding issues")
     st.warning(
-        "URLs with spaces or non-ASCII characters can cause feed rejection — they should be "
-        "percent-encoded. The feed transformer normally handles this, but it's worth verifying the output."
+        "URLs with spaces or non-ASCII characters cause the rejection of the product or the image, they should be percent-encoded."
     )
 
 bad_url_rows = [
