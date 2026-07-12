@@ -142,15 +142,130 @@ class FieldCasingMatrixTest(unittest.TestCase):
 
     def test_no_false_positive_when_genuinely_absent(self):
         # No id / url / image / price children -> readers must report empty,
-        # i.e. the alias fallback never invents a value.
+        # i.e. the alias fallback never invents a value. Note: detection now
+        # requires a Compari-distinctive tag (Identifier/Product_url/Image_url),
+        # so this degenerate feed is UNKNOWN — we pin the spec to exercise the
+        # readers directly.
         xml = ("<products><product><Name>X</Name><Category>C</Category>"
                "<Description>d</Description></product></products>")
-        spec, item = self._first_item(xml)
-        self.assertEqual(spec, COMPARI)
-        self.assertEqual(fs.read_id(item, spec), "")
-        self.assertEqual(fs.read_link(item, spec), "")
-        self.assertEqual(fs.gather_primary_image(item, spec), "")
-        self.assertEqual(fs.read_price(item, spec), (None, ""))
+        root = ET.fromstring(xml)
+        self.assertEqual(fs.detect_spec(root), "UNKNOWN")
+        item = fs.get_item_nodes(root, COMPARI)[0]
+        self.assertEqual(fs.read_id(item, COMPARI), "")
+        self.assertEqual(fs.read_link(item, COMPARI), "")
+        self.assertEqual(fs.gather_primary_image(item, COMPARI), "")
+        self.assertEqual(fs.read_price(item, COMPARI), (None, ""))
+
+
+class PriceAnalysisTest(unittest.TestCase):
+    """analyze_price_text drives BOTH the parser and the GUI format validator,
+    so these cases pin amount + format verdict together (they can never
+    disagree). Expected tuples: (amount, format_valid, overprecision)."""
+
+    CASES = {
+        "8000":       (8000.0, True, False),
+        "8,000":      (8000.0, True, False),   # FAVI-documented comma thousands
+        "8 000":      (8000.0, True, False),
+        "8000,70":    (8000.7, True, False),
+        "8000.70":    (8000.7, True, False),
+        "1 234,50":   (1234.5, True, False),
+        "1,234.50":   (1234.5, True, False),   # comma groups + dot decimals: allowed
+        "1,234,567":  (1234567.0, True, False),
+        "8.000":      (8000.0, False, False),  # dot must not group thousands
+        "1.234,50":   (1234.5, False, False),
+        "1.234.567":  (1234567.0, False, False),
+        "8000,505":   (8000.505, True, True),  # comma decimal, NOT thousands ×1000
+        "1,2345":     (1.2345, True, True),    # no silent token truncation
+        "1234 567":   (None, False, False),    # malformed grouping, not "1234"
+        "8000 CZK":   (8000.0, True, False),
+        "8 000": (8000.0, True, False),   # narrow NBSP (CLDR cs/fr/pl)
+        "0":          (0.0, True, False),
+        "-5":         (-5.0, True, False),
+    }
+
+    def test_matrix(self):
+        for raw, (amount, valid, overprec) in self.CASES.items():
+            amt, v, op, _reason = fs.analyze_price_text(raw)
+            self.assertEqual((amt, v, op), (amount, valid, overprec), f"case {raw!r}")
+
+    def test_parse_price_text_same_amounts(self):
+        for raw, (amount, _v, _op) in self.CASES.items():
+            self.assertEqual(fs.parse_price_text(raw), amount, f"case {raw!r}")
+
+
+class DetectionRegressionTest(unittest.TestCase):
+    def test_skroutz_mywebstore_root(self):
+        xml = ("<mywebstore><created_at>t</created_at><products><product>"
+               "<id>1</id><name>n</name><link>https://x.gr/p</link>"
+               "<image>https://x.gr/i.jpg</image><price_with_vat>9.99</price_with_vat>"
+               "</product></products></mywebstore>")
+        self.assertEqual(fs.detect_spec(ET.fromstring(xml)), "Skroutz strict")
+
+    def test_generic_product_feed_not_compari(self):
+        # name/price/category/description alone must NOT classify as Compari —
+        # its path table would then read <link>/<image> as empty and mass-flag
+        # every product as missing URL/image.
+        xml = ("<products><product><id>1</id><name>N</name><link>https://x/p</link>"
+               "<image>https://x/i.jpg</image><price>10.00</price>"
+               "<category>Sofas</category><description>d</description>"
+               "</product></products>")
+        self.assertEqual(fs.detect_spec(ET.fromstring(xml)), "UNKNOWN")
+
+    def test_heureka_itemgroup_is_not_an_id(self):
+        xml = ("<SHOP><SHOPITEM><ITEMGROUP_ID>G1</ITEMGROUP_ID>"
+               "<PRODUCTNAME>A</PRODUCTNAME><URL>https://x/a</URL>"
+               "</SHOPITEM></SHOP>")
+        root = ET.fromstring(xml)
+        spec = fs.detect_spec(root)
+        self.assertEqual(spec, "Heureka strict")
+        self.assertEqual(fs.read_id(fs.get_item_nodes(root, spec)[0], spec), "")
+
+    def test_heureka_net_price_does_not_mask_missing_price_vat(self):
+        xml = ("<SHOP><SHOPITEM><ITEM_ID>1</ITEM_ID><PRICE>100</PRICE>"
+               "</SHOPITEM></SHOP>")
+        item = fs.get_item_nodes(ET.fromstring(xml), "Heureka strict")[0]
+        self.assertEqual(fs.read_price(item, "Heureka strict"), (None, ""))
+
+
+class UrlAndGtinTest(unittest.TestCase):
+    def test_percent_encode_idempotent(self):
+        u = "https://shop.cz/st%C5%AFl?ref=a%20b"
+        self.assertEqual(fs.percent_encode_url(u), u)
+        self.assertEqual(fs.percent_encode_url("https://x/a b.jpg"), "https://x/a%20b.jpg")
+
+    def test_percent_encode_never_raises(self):
+        self.assertEqual(fs.percent_encode_url("http://[broken/p"), "http://[broken/p")
+
+    def test_gtin(self):
+        self.assertTrue(fs.is_valid_gtin("6417182041488"))
+        self.assertFalse(fs.is_valid_gtin("6417182041489"))   # bad check digit
+        self.assertFalse(fs.is_valid_gtin("1234567"))         # bad length
+        self.assertFalse(fs.is_valid_gtin("INTERNAL-1"))
+
+
+class NestedParamsTest(unittest.TestCase):
+    def test_ceneo_attrs_brand_and_ean_visible(self):
+        xml = ('<offers><o id="1" url="https://x/p" price="100" avail="1">'
+               '<cat>Meble</cat><name>Sofa</name><desc>d</desc>'
+               '<imgs><main url="https://x/i.jpg"/><i url="https://x/2.jpg"/></imgs>'
+               '<attrs><a name="Producent">BRW</a><a name="EAN">6417182041488</a></attrs>'
+               '</o></offers>')
+        root = ET.fromstring(xml)
+        item = fs.get_item_nodes(root, fs.detect_spec(root))[0]
+        present = fs.present_recommended_fields(item)
+        self.assertIn("brand", present)
+        self.assertIn("gtin", present)
+        self.assertEqual(fs.read_recommended_value(item, "gtin"), "6417182041488")
+        # gallery path fixed: Ceneo uses <i url=...>, not <img>
+        self.assertEqual(fs.gather_gallery(item, "Ceneo strict"), ["https://x/2.jpg"])
+
+    def test_atom_summary_counts_as_description(self):
+        xml = ('<feed xmlns="http://www.w3.org/2005/Atom" '
+               'xmlns:g="http://base.google.com/ns/1.0"><entry>'
+               '<g:id>1</g:id><title>TV</title><summary>Nice.</summary>'
+               '</entry></feed>')
+        item = ET.fromstring(xml).find("{http://www.w3.org/2005/Atom}entry")
+        self.assertIn("description", fs.present_recommended_fields(item))
 
 
 class GoogleNoNamespaceRootTest(unittest.TestCase):

@@ -26,49 +26,116 @@ def read_link_raw(elem: ET.Element, spec_name: str) -> str:
     return _read_first_ci(elem, SPEC.get(spec_name, {}).get("link_paths", []))
 
 # ---------- PRICE HELPERS (no currency) ----------
-# Finds "1 234,50" / "1234.50" / "1234" / "1,234.50" etc.
-# The grouped-thousands alternative REQUIRES a separator between 3-digit groups;
-# otherwise a plain integer like "8000" matches "\d{1,3}" greedily ("800") and
-# the rest can't form a full group, truncating the value. With the separator
-# required, "8000" falls through to the plain-number alternative instead.
-_price_num_re = re.compile(
-    r"[-+]?\d{1,3}(?:[ .,\u00A0]\d{3})+(?:[.,]\d+)?|[-+]?\d+(?:[.,]\d+)?"
-)
+# One shared analysis is used by BOTH the amount parser and the FAVI format
+# validator, so they can never disagree about the same string.
+#
+# FAVI accepts: "8000", "8,000", "8 000", "8000.70", "8000,70" — comma or
+# space may group thousands, dot is ONLY a decimal separator, and >2 decimals
+# are auto-rounded (warn, not reject).
 
-def _normalize_amount(txt: str) -> float | None:
-    """Extract first numeric-like token and normalize to float."""
-    if not txt:
-        return None
-    m = _price_num_re.search(txt)
+# NBSP / narrow NBSP / thin space: CLDR formatters emit these as thousands
+# separators for cs/fr/pl locales.
+_SPACE_SEPS = "\u00A0\u202F\u2009"
+
+# The full contiguous numeric region (digits + any separators), NOT just the
+# longest well-formed prefix — so malformed grouping like "1234 567" is seen
+# whole and rejected instead of being silently truncated to "1234".
+_num_run_re = re.compile(r"[+-]?\d[\d .,\u00A0\u202F\u2009]*")
+
+
+def _first_numeric_run(txt: str) -> str:
+    m = _num_run_re.search(txt or "")
     if not m:
-        return None
-    raw = m.group(0)
-    s = raw.replace("\u00A0", " ").strip()
-    s = s.replace(" ", "")  # spaces as thousand sep
+        return ""
+    run = m.group(0)
+    for ch in _SPACE_SEPS:
+        run = run.replace(ch, " ")
+    # trailing separators belong to surrounding prose ("8 000, incl. VAT")
+    return run.strip(" .,")
 
-    # If both separators appear, treat the rightmost as decimal, the other as thousands
-    if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "")
-            s = s.replace(",", ".")
+
+def _grouped_ok(parts: List[str]) -> bool:
+    """Thousands grouping: 1-3 digit head, then groups of exactly 3."""
+    return (
+        bool(parts)
+        and parts[0].isdigit() and 1 <= len(parts[0]) <= 3
+        and all(p.isdigit() and len(p) == 3 for p in parts[1:])
+    )
+
+
+def analyze_price_text(raw_text: str) -> Tuple[float | None, bool, bool, str]:
+    """
+    Returns (amount, format_valid, overprecision, reason).
+      amount        parsed value, or None when it can't be read confidently
+      format_valid  obeys FAVI grouping/decimal rules
+      overprecision >2 decimals (FAVI rounds; warn only)
+      reason        explanation when invalid
+    """
+    if raw_text is None or not str(raw_text).strip():
+        return None, False, False, "missing"
+    body = _first_numeric_run(str(raw_text))
+    if not body:
+        return None, False, False, "no numeric token"
+    sign = -1.0 if body.startswith("-") else 1.0
+    body = body.lstrip("+-")
+    if not body or not re.fullmatch(r"[\d .,]+", body):
+        return None, False, False, "not a numeric value"
+
+    has_space = " " in body
+    n_dots = body.count(".")
+    n_commas = body.count(",")
+    group_sep = ""   # "." / "," when that char groups thousands
+    dec_part = ""
+
+    if n_dots and n_commas:
+        # Both present: the rightmost one is the decimal separator.
+        dec_sep = "." if body.rfind(".") > body.rfind(",") else ","
+        group_sep = "," if dec_sep == "." else "."
+        head, _, dec_part = body.rpartition(dec_sep)
+        if dec_sep in head or not dec_part.isdigit():
+            return None, False, False, "malformed number"
+    elif n_dots or n_commas:
+        sep = "." if n_dots else ","
+        if (n_dots or n_commas) > 1:
+            # Repeated separator can only be thousands grouping.
+            group_sep, head = sep, body
         else:
-            s = s.replace(",", "")
+            head0, _, tail = body.rpartition(sep)
+            if (
+                len(tail) == 3 and tail.isdigit()
+                and not has_space
+                and head0.isdigit() and 1 <= len(head0) <= 3
+            ):
+                # "8,000" / "8.000" style: separator groups thousands.
+                group_sep, head = sep, body
+            else:
+                head, dec_part = head0, tail
+                if not dec_part.isdigit():
+                    return None, False, False, "malformed number"
     else:
-        # Only one (or none)
-        if s.count(",") == 1 and s.rfind(",") >= len(s) - 3:
-            s = s.replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    try:
-        return float(s)
-    except Exception:
-        return None
+        head = body
+
+    parts = re.split(r"[ " + re.escape(group_sep) + r"]" if group_sep else r"[ ]", head)
+    if any(not p.isdigit() for p in parts):
+        return None, False, False, "malformed number"
+    if len(parts) > 1 and not _grouped_ok(parts):
+        return None, False, False, "digit grouping is malformed (thousands groups must be 3 digits)"
+
+    amount = sign * float("".join(parts) + ("." + dec_part if dec_part else ""))
+    overprec = len(dec_part) > 2
+
+    if group_sep == ".":
+        # FAVI: dot must never group thousands (dot is only a decimal separator).
+        return amount, False, overprec, (
+            "dot used to group thousands — FAVI reads '.' only as a decimal "
+            "separator (use spaces, commas, or nothing)"
+        )
+    return amount, True, overprec, ""
+
 
 def parse_price_text(raw_text: str) -> float | None:
     """Return amount parsed from raw text like '1 234,50'."""
-    if not raw_text:
-        return None
-    return _normalize_amount(raw_text)
+    return analyze_price_text(raw_text)[0]
 
 def read_price_text(elem: ET.Element, spec_name: str) -> str:
     """
@@ -78,8 +145,11 @@ def read_price_text(elem: ET.Element, spec_name: str) -> str:
     spec = SPEC.get(spec_name, {})
     paths: List[str] = spec.get("price_paths", [])
 
-    # Fallbacks (cover broad ecosystems; SPEC paths take precedence)
-    fallback_paths = [
+    # Generic fallbacks are used ONLY when the spec defines no price paths of
+    # its own (unknown/unconfigured formats). For a known spec they would mask
+    # a missing required VAT price — e.g. a Heureka item with only a net
+    # <PRICE> (no PRICE_VAT) must be reported as missing, not silently read.
+    fallback_paths = [] if paths else [
         "g:sale_price", "g:price",        # Google Merchant
         "PRICE_VAT", "Price", "price",    # Heureka/Compari/etc.
         "price_with_vat",                 # Skroutz
@@ -234,10 +304,18 @@ def percent_encode_url(url: str) -> str:
     if not url:
         return url
     from urllib.parse import urlsplit, urlunsplit, quote
-    parts = urlsplit(url)
-    path = quote(parts.path or "", safe="/:@&+$,;=-._~")
-    query = quote(parts.query or "", safe="=/?&:+,;@-._~")
-    frag  = quote(parts.fragment or "", safe="-._~")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # e.g. unclosed '[' parses as a broken IPv6 host — leave the URL
+        # untouched; the validity checks flag it, and one bad URL must not
+        # abort the whole run.
+        return url
+    # '%' is kept safe so an already-encoded URL passes through unchanged
+    # (idempotent) instead of being double-encoded to %25xx.
+    path = quote(parts.path or "", safe="%/:@&+$,;=-._~")
+    query = quote(parts.query or "", safe="%=/?&:+,;@-._~")
+    frag  = quote(parts.fragment or "", safe="%-._~")
     return urlunsplit((parts.scheme, parts.netloc, path, query, frag))
 
 # -------------------- SPEC definitions --------------------
@@ -315,10 +393,12 @@ SPEC: Dict[str, Dict[str, Any]] = {
             ".//hz:SHOPITEM",
             ".//SHOPITEM", ".//shopitem", ".//ShopItem"
         ],
+        # NOTE: ITEMGROUP_ID must NOT be an id fallback — it is shared across
+        # variants, so using it masks missing ITEM_IDs and fabricates
+        # duplicate-ID errors for every variant group.
         "id_paths": [
             "./hz:ITEM_ID", "./hz:item_id", "./hz:ItemId",
-            "./hz:ITEMGROUP_ID", "./hz:itemgroup_id", "./hz:ItemGroupId",
-            "./ITEM_ID", "./item_id", "./ItemId", "./ITEMGROUP_ID", "./itemgroup_id"
+            "./ITEM_ID", "./item_id", "./ItemId"
         ],
         "link_paths": [
             "./hz:URL",
@@ -384,7 +464,8 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "signature_tags": [
             "id","name","link","image","price_with_vat","category","category_id","brand","availability"
         ],
-        "expected_root_locals": ["products"],
+        # Skroutz's canonical feed wraps <products> in <mywebstore>.
+        "expected_root_locals": ["mywebstore", "products"],
     },
 
     "Jeftinije / Ceneje (element-based)": {
@@ -426,7 +507,8 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "id_paths": ["@id"],
         "link_paths": ["@url"],
         "image_primary_paths": ["./imgs/main/@url", "./image"],
-        "image_gallery_paths": ["./imgs/img/@url"],
+        # Ceneo gallery images are <imgs><i url="..."/> (not <img>).
+        "image_gallery_paths": ["./imgs/i/@url", "./imgs/img/@url"],
         "price_paths": ["@price", "./price"],  # attribute first
         "required_fields": ["name", "price", "cat", "url"],
         "availability_paths": ["@avail", "@availability", "@stock"],
@@ -549,9 +631,18 @@ def detect_spec(root: ET.Element) -> str:
                 "identifier", "productid", "name", "product_url", "image_url",
                 "price", "category", "description"
             })
+            # Require at least one Compari-DISTINCTIVE tag. Generic fields
+            # (name/price/category/description) alone would misclassify any
+            # generic <product> feed as Compari, whose path table then reads
+            # <link>/<image> as empty and mass-flags missing URLs/images.
+            compari_distinctive = child_names & {
+                "identifier", "productid", "product_url", "producturl",
+                "image_url", "imageurl",
+            }
             if (
                 _matches_expected_root(root, "Compari / Árukereső / Pazaruvaj (case-insensitive)")
                 and compari_hits >= 3
+                and compari_distinctive
             ):
                 return "Compari / Árukereső / Pazaruvaj (case-insensitive)"
 
@@ -727,12 +818,6 @@ def read_availability(elem: ET.Element, spec_name: str) -> str:
     if val:
         return val
 
-    # Heureka special: if DELIVERY_DATE is present and < 3 -> "in stock"
-    if spec_name == "Heureka strict":
-        dd = _first(elem, ["./DELIVERY_DATE"])
-        if dd and dd.isdigit() and int(dd) < 3:
-            return "in stock"
-
     # Case-insensitive fallback. The availability_paths above are matched by
     # ElementTree.find(), which is case-sensitive, so a one-letter casing
     # difference (feed's <Delivery_Time> vs spec's ./Delivery_time) reads as
@@ -788,7 +873,8 @@ RECOMMENDED_FIELDS: List[Dict[str, Any]] = [
     },
     {
         "key": "description", "label": "Description", "required": True,
-        "aliases": {"description", "desc"},
+        # "summary" is Google Merchant's documented Atom description element.
+        "aliases": {"description", "desc", "summary"},
     },
     {
         "key": "category", "label": "Category", "required": True,
@@ -806,7 +892,8 @@ RECOMMENDED_FIELDS: List[Dict[str, Any]] = [
     },
     {
         "key": "brand", "label": "Manufacturer / brand", "required": False,
-        "aliases": {"manufacturer", "brand", "producer", "vendor"},
+        # "producent" is Ceneo's Polish attribute name.
+        "aliases": {"manufacturer", "brand", "producer", "producent", "vendor"},
     },
     {
         "key": "gtin", "label": "EAN / GTIN", "required": False,
@@ -815,13 +902,60 @@ RECOMMENDED_FIELDS: List[Dict[str, Any]] = [
 ]
 
 
+# Containers whose children carry name/value parameter pairs:
+# Ceneo <attrs><a name="EAN">v</a>, Compari <Attributes><Attribute>,
+# Jeftinije <attributes><attribute><name>/<values>.
+_PARAM_CONTAINER_LOCALS = {"attrs", "attributes", "params"}
+_PARAM_NAME_LOCALS = {"param_name", "name", "attribute_name"}
+_PARAM_VALUE_LOCALS = {"val", "value", "values", "attribute_value"}
+
+
+def _named_param_values(elem: ET.Element) -> Dict[str, str]:
+    """name→value pairs (names lowercased) from parameter containers and
+    Heureka-style repeated <PARAM> children. This is where Ceneo feeds keep
+    brand ("Producent") and EAN, so presence checks must look inside."""
+    out: Dict[str, str] = {}
+
+    def _pair_from(sub: ET.Element) -> Tuple[str, str]:
+        nm = (sub.get("name") or "").strip().lower()
+        val = (sub.text or "").strip()
+        if not nm:
+            for g in list(sub):
+                if not isinstance(g.tag, str):
+                    continue
+                g_local = strip_ns(g.tag).lower()
+                if g_local in _PARAM_NAME_LOCALS and not nm:
+                    nm = (g.text or "").strip().lower()
+                elif g_local in _PARAM_VALUE_LOCALS and not val:
+                    val = (g.text or "").strip()
+        return nm, val
+
+    for child in list(elem):
+        if not isinstance(child.tag, str):
+            continue
+        local = strip_ns(child.tag).lower()
+        if local in _PARAM_CONTAINER_LOCALS:
+            for sub in list(child):
+                if not isinstance(sub.tag, str):
+                    continue
+                nm, val = _pair_from(sub)
+                if nm and val and nm not in out:
+                    out[nm] = val
+        elif local == "param":
+            nm, val = _pair_from(child)
+            if nm and val and nm not in out:
+                out[nm] = val
+    return out
+
+
 def _present_value_localnames(elem: ET.Element) -> set[str]:
     """Localnames (lowercased) that carry a value on this item element.
 
     A direct child counts when it has non-empty text, sub-children (container
     elements such as Heureka <DELIVERY> or Google <g:shipping>), or its own
     attributes. Item attributes with a non-empty value count too — this is how
-    attribute-based specs (Ceneje.si, Ceneo) expose their fields.
+    attribute-based specs (Ceneje.si, Ceneo) expose their fields. Named
+    parameters inside attrs/attributes containers count under their name.
     """
     present: set[str] = set()
     for child in list(elem):
@@ -832,7 +966,35 @@ def _present_value_localnames(elem: ET.Element) -> set[str]:
     for k, v in (elem.attrib or {}).items():
         if (v or "").strip():
             present.add(str(k).lower())
+    present |= set(_named_param_values(elem).keys())
     return present
+
+
+def read_recommended_value(elem: ET.Element, key: str) -> str:
+    """Value of a RECOMMENDED_FIELDS entry (e.g. 'gtin', 'description',
+    'category') read the same alias-based way presence is detected — direct
+    children / item attributes first, then named parameters."""
+    field = next((f for f in RECOMMENDED_FIELDS if f["key"] == key), None)
+    if field is None:
+        return ""
+    aliases = sorted(field["aliases"])
+    val = _value_by_localname_ci(elem, aliases)
+    if val:
+        return val
+    named = _named_param_values(elem)
+    for a in aliases:
+        if named.get(a):
+            return named[a]
+    return ""
+
+
+def is_valid_gtin(code: str) -> bool:
+    """FAVI EAN/GTIN rule: 8, 12, 13 or 14 digits passing the GS1 checksum."""
+    c = re.sub(r"[\s   -]", "", code or "")
+    if not c.isdigit() or len(c) not in (8, 12, 13, 14):
+        return False
+    total = sum(int(d) * (3 if i % 2 == 0 else 1) for i, d in enumerate(reversed(c[:-1])))
+    return (10 - total % 10) % 10 == int(c[-1])
 
 
 def present_recommended_fields(elem: ET.Element) -> set[str]:
