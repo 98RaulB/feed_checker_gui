@@ -1164,13 +1164,12 @@ if st.session_state.get("clickup_draft_seed") != draft_seed:
     st.session_state["clickup_draft_seed"] = draft_seed
     st.session_state["clickup_editor_open"] = False
 
-summary_col, clickup_col = st.columns([1.35, 1], gap="large")
+summarize(pass_fail)
 
-with summary_col:
-    summarize(pass_fail)
-
-with clickup_col:
-    st.subheader("ClickUp ticket draft")
+# INTENTIONALLY de-emphasized: the ClickUp draft flow is unfinished (see
+# c56af0f). Keep it inside this collapsed expander — do NOT promote it back
+# to a column/subheader until the feature is actually done.
+with st.expander("ClickUp ticket draft (work in progress)", expanded=False):
     st.caption(
         "Pre-filled from this run — adjust anything below, then open the "
         "pre-filled ClickUp form."
