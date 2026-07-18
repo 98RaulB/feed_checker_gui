@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadFeedListForAudit",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:Scan",
+        "dynamodb:DescribeTable"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:eu-north-1:620369152593:table/feed_configs"
+      ]
+    }
+  ]
+}

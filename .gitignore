@@ -1,2 +1,10 @@
 __pycache__/
 *.pyc
+.venv/
+venv/
+.DS_Store
+
+# feed-quality-audit run outputs (persisted as workflow artifacts, not git)
+state.json
+prev-state.json
+report.md

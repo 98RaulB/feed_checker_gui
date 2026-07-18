@@ -1,0 +1,103 @@
+name: Feed Quality Audit
+
+# Nightly ADVISORY audit of the live published feeds using feed_specs (the
+# same toolkit the checker GUI uses — same repo, so they can't drift).
+#
+#   * Never blocks or mutates anything. Per-item issues are warn-only counts.
+#   * The run goes red ONLY when a feed gains a NEW feed-level blocker vs the
+#     previous run (stops parsing, empties, item count halves, every price
+#     breaks) — a change is the signal, so the checker being stricter than
+#     FAVI can't cause alert noise. First run is a silent baseline.
+#   * Feed CONTENT is fetched over the public CDN URLs. AWS is only used to
+#     read the feed list (read-only role favi-feed-audit, dynamodb:Scan on
+#     feed_configs; trust = main branch of this repo).
+#
+# Cost: ~$0 — GitHub runner minutes + a DynamoDB scan + CDN egress well
+# inside the CloudFront always-free tier.
+#
+# Runs at 04:47 UTC, after the pipeline repo's nightly-ops sync (03:17).
+
+on:
+  schedule:
+    - cron: "47 4 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Audit only the first N feeds (smoke run); empty = all"
+        required: false
+        default: ""
+
+concurrency:
+  group: feed-quality-audit
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # OIDC -> favi-feed-audit (read-only)
+  contents: read
+  actions: read # download previous run's state artifact
+
+env:
+  AWS_REGION: eu-north-1
+  AUDIT_ROLE_ARN: arn:aws:iam::620369152593:role/favi-feed-audit
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install audit dependencies
+        run: pip install --quiet requests defusedxml boto3
+
+      - name: Authenticate to AWS (OIDC -> favi-feed-audit, read-only)
+        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          role-to-assume: ${{ env.AUDIT_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fetch previous state (baseline for delta alerting)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Latest successful run of THIS workflow that produced a state artifact.
+          run_id=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/feed-quality-audit.yml/runs?status=completed&per_page=10" \
+            | python3 -c 'import json,sys; runs=[r for r in json.load(sys.stdin)["workflow_runs"]]; print(runs[0]["id"] if runs else "")')
+          if [ -z "$run_id" ]; then echo "no previous run — baseline"; exit 0; fi
+          art_url=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/$run_id/artifacts" \
+            | python3 -c 'import json,sys; a=[x for x in json.load(sys.stdin)["artifacts"] if x["name"]=="audit-state"]; print(a[0]["archive_download_url"] if a else "")')
+          if [ -z "$art_url" ]; then echo "previous run has no state artifact — baseline"; exit 0; fi
+          curl -sfL -H "Authorization: Bearer $GH_TOKEN" -o prev-state.zip "$art_url"
+          python3 -c 'import zipfile; zipfile.ZipFile("prev-state.zip").extract("state.json"); import os; os.rename("state.json","prev-state.json")'
+          echo "previous state restored"
+
+      - name: Run audit
+        run: |
+          LIMIT_ARG=""
+          if [ -n "${{ github.event.inputs.limit }}" ]; then LIMIT_ARG="--limit ${{ github.event.inputs.limit }}"; fi
+          python audit/audit_feeds.py --state state.json --report report.md \
+            ${LIMIT_ARG} $( [ -f prev-state.json ] && echo "--prev prev-state.json" )
+
+      - name: Upload state (next run's baseline)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-state
+          path: state.json
+          retention-days: 30
+
+      - name: Upload report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report
+          path: report.md
+          retention-days: 30
