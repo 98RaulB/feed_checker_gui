@@ -213,6 +213,7 @@ def main() -> int:
     ap.add_argument("--report", required=True)
     ap.add_argument("--prev")
     ap.add_argument("--limit", type=int, default=0, help="audit only first N feeds (smoke)")
+    ap.add_argument("--feed-id", help="audit a single feed (onboarding verification); includes paused")
     args = ap.parse_args()
 
     prev = {}
@@ -224,11 +225,20 @@ def main() -> int:
         print("no previous state — baseline run, delta alerting disabled")
 
     feeds = [f for f in list_feeds() if f["feedId"] and f["outputUrl"]]
-    active = [f for f in feeds if not f["isPaused"]]
-    skipped_paused = len(feeds) - len(active)
-    if args.limit:
-        active = active[: args.limit]
-    print(f"auditing {len(active)} active feed(s) ({skipped_paused} paused skipped)")
+    if args.feed_id:
+        # Onboarding verification: one feed, paused or not, no delta alerting.
+        active = [f for f in feeds if f["feedId"] == args.feed_id]
+        skipped_paused = 0
+        if not active:
+            print(f"feed {args.feed_id} not found (or has no outputUrl yet)")
+            return 1
+        prev = {}
+    else:
+        active = [f for f in feeds if not f["isPaused"]]
+        skipped_paused = len(feeds) - len(active)
+        if args.limit:
+            active = active[: args.limit]
+    print(f"auditing {len(active)} feed(s) ({skipped_paused} paused skipped)")
 
     state_feeds: dict[str, dict] = {}
     for i, feed in enumerate(active, 1):
