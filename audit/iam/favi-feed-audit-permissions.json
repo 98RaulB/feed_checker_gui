@@ -11,6 +11,12 @@
       "Resource": [
         "arn:aws:dynamodb:eu-north-1:620369152593:table/feed_configs"
       ]
+    },
+    {
+      "Sid": "PublishAuditStateForDigest",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::favi-feed-transformer-output/_meta/audit/*"
     }
   ]
 }

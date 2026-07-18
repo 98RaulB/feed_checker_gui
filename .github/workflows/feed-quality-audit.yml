@@ -94,6 +94,12 @@ jobs:
           path: state.json
           retention-days: 30
 
+      - name: Publish state to S3 (weekly digest reads it)
+        # _meta/* is NOT publicly readable (bucket policy covers feeds/* only);
+        # the digest workflow reads this with its own read-only role.
+        if: ${{ !cancelled() }}
+        run: aws s3 cp state.json s3://favi-feed-transformer-output/_meta/audit/latest-state.json --content-type application/json --cache-control no-cache
+
       - name: Upload report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
