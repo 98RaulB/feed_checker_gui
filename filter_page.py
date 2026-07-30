@@ -1,4 +1,4 @@
-# pages/1_Feed_Filter.py
+# filter_page.py — Feed Filter page; mounted by feed_checker_gui.py.
 # Live feed filter for Account Managers — build AND/OR rules against a feed and
 # see, in real time, how many products they would remove. Standalone from the
 # validator: it drives feed_filter.py (pure engine) and never touches the
@@ -24,7 +24,6 @@ import feed_filter as ff
 REQUEST_TIMEOUT = 120
 STREAM_CHUNK = 1 << 20
 
-st.set_page_config(page_title="FAVI Feed Filter", page_icon=FAVICON_URL, layout="wide")
 inject_css()
 page_header(
     "Feed Filter",
