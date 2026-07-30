@@ -591,6 +591,12 @@ file_size = os.path.getsize(src_path) if os.path.exists(src_path) else 0
 auto_force_streaming = is_gzip_path(src_path) or (file_size > SMALL_SIZE_LIMIT)
 use_sample_mode = (scope == "Sample first N items")
 
+# Hand the just-checked feed to the Feed Filter page (session_state is shared
+# across pages; the temp file persists — delete=False). Purely additive.
+st.session_state["shared_feed_path"] = src_path
+st.session_state["shared_feed_label"] = src_label
+st.session_state["shared_feed_size"] = file_size
+
 # Data buckets (shared)
 xml_ok = True
 spec_name = "UNKNOWN"
