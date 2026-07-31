@@ -67,15 +67,18 @@ except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
 inject_css()
+# Use the full page width — the check + browse panels sit side by side.
+st.markdown(
+    "<style>.block-container{max-width:100% !important;"
+    "padding-left:2rem !important;padding-right:2rem !important;}</style>",
+    unsafe_allow_html=True,
+)
 page_header(
     "Feed Checker",
-    subtitle="Validate a product feed before FAVI import — detects the format, checks "
-             "required fields and price formatting, and flags missing recommended elements.",
+    subtitle="Check a product feed for FAVI and browse/filter it in one view — "
+             "validation on the left, live rule-based browsing on the right.",
 )
-st.warning(
-    "🚧 **Beta** — the Feed Checker is still in beta. More fixes and new "
-    "functionality are coming soon."
-)
+st.warning("🚧 **Beta** — more fixes and functionality coming soon.")
 
 # --------- Tuning ----------
 SMALL_SIZE_LIMIT = 30 * 1024 * 1024   # 30 MB → DOM; above this → streaming
@@ -1525,21 +1528,28 @@ def _prepare_browse_table():
     return st.session_state.get("ff_table")
 
 
-# ---------- Validation + Browse in one place ----------
-tab_validate, tab_browse = st.tabs(["✅ Validation", "🔎 Browse & filter"])
+# ---------- Check + browse, side by side ----------
+# One load feeds both panels: validation on the left, live browse/filter on the
+# right — so it's immediately clear the tool does both.
+st.markdown("---")
+col_validate, col_browse = st.columns(2, gap="large")
 
-# Render Browse first so a fatal parse error in Validation (which still st.stop()s)
-# cannot blank out the Browse tab.
-with tab_browse:
+# Render the Browse column first in code so a fatal parse error in Validation
+# (which still st.stop()s) cannot blank out the Browse column.
+with col_browse:
+    st.subheader("🔎 Browse & filter")
+    st.caption("Build AND/OR rules and see how many products remain — live.")
     _browse_table = _prepare_browse_table()
     if _browse_table is None:
         pass
     elif _browse_table.spec == "UNKNOWN":
-        st.warning("Format not recognized — nothing to filter here. See the Validation tab.")
+        st.warning("Format not recognized — nothing to filter. See Validation on the left.")
     elif _browse_table.n == 0:
         st.info("No items were found to filter.")
     else:
         render_filter()
 
-with tab_validate:
+with col_validate:
+    st.subheader("✅ Validation")
+    st.caption("Format, required fields, prices, duplicates and recommended elements.")
     render_validation()
