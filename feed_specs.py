@@ -325,6 +325,10 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "id_paths": ["./{http://base.google.com/ns/1.0}id", "./g:id"],
         "link_paths": ["./link", "./{http://base.google.com/ns/1.0}link", "./g:link"],
         "image_primary_paths": ["./{http://base.google.com/ns/1.0}image_link", "./g:image_link"],
+        "image_gallery_paths": [
+            "./{http://base.google.com/ns/1.0}additional_image_link",
+            "./g:additional_image_link",
+        ],
         "price_paths": [
             "./{http://base.google.com/ns/1.0}sale_price", "./g:sale_price",
             "./{http://base.google.com/ns/1.0}price", "./g:price",
@@ -354,6 +358,10 @@ SPEC: Dict[str, Dict[str, Any]] = {
             "./{http://base.google.com/ns/1.0}link",
         ],
         "image_primary_paths": ["./{http://base.google.com/ns/1.0}image_link", "./g:image_link"],
+        "image_gallery_paths": [
+            "./{http://base.google.com/ns/1.0}additional_image_link",
+            "./g:additional_image_link",
+        ],
         "price_paths": [
             "./{http://base.google.com/ns/1.0}sale_price", "./g:sale_price",
             "./{http://base.google.com/ns/1.0}price", "./g:price",
@@ -374,6 +382,7 @@ SPEC: Dict[str, Dict[str, Any]] = {
         "id_paths": ["./id"],
         "link_paths": ["./link"],
         "image_primary_paths": ["./image_link"],
+        "image_gallery_paths": ["./additional_image_link"],
         "price_paths": ["./sale_price", "./price"],
         "required_fields": ["title", "description", "link", "image_link"],
         "availability_paths": ["./availability"],
@@ -916,18 +925,56 @@ def _named_param_values(elem: ET.Element) -> Dict[str, str]:
     brand ("Producent") and EAN, so presence checks must look inside."""
     out: Dict[str, str] = {}
 
+    def _store(nm: str, val: str) -> None:
+        if not nm or not val:
+            return
+        values = [
+            part.strip()
+            for joined in (out.get(nm, ""), val)
+            for part in joined.split(" | ")
+            if part.strip()
+        ]
+        out[nm] = " | ".join(dict.fromkeys(values))
+
     def _pair_from(sub: ET.Element) -> Tuple[str, str]:
-        nm = (sub.get("name") or "").strip().lower()
-        val = (sub.text or "").strip()
-        if not nm:
-            for g in list(sub):
-                if not isinstance(g.tag, str):
-                    continue
-                g_local = strip_ns(g.tag).lower()
-                if g_local in _PARAM_NAME_LOCALS and not nm:
-                    nm = (g.text or "").strip().lower()
-                elif g_local in _PARAM_VALUE_LOCALS and not val:
-                    val = (g.text or "").strip()
+        attrs = {
+            strip_ns(str(key)).lower(): str(value)
+            for key, value in sub.attrib.items()
+        }
+        nm = next(
+            (
+                attrs[key].strip().lower()
+                for key in _PARAM_NAME_LOCALS
+                if attrs.get(key, "").strip()
+            ),
+            "",
+        )
+        attr_val = next(
+            (
+                attrs[key].strip()
+                for key in _PARAM_VALUE_LOCALS
+                if attrs.get(key, "").strip()
+            ),
+            "",
+        )
+        value_parts = [
+            value
+            for value in (attr_val, (sub.text or "").strip())
+            if value
+        ]
+        for g in list(sub):
+            if not isinstance(g.tag, str):
+                continue
+            g_local = strip_ns(g.tag).lower()
+            if g_local in _PARAM_NAME_LOCALS and not nm:
+                nm = (g.text or "").strip().lower()
+            elif g_local in _PARAM_VALUE_LOCALS:
+                value_parts.extend(
+                    text.strip()
+                    for text in g.itertext()
+                    if text.strip()
+                )
+        val = " | ".join(dict.fromkeys(value_parts))
         return nm, val
 
     for child in list(elem):
@@ -939,12 +986,10 @@ def _named_param_values(elem: ET.Element) -> Dict[str, str]:
                 if not isinstance(sub.tag, str):
                     continue
                 nm, val = _pair_from(sub)
-                if nm and val and nm not in out:
-                    out[nm] = val
+                _store(nm, val)
         elif local == "param":
             nm, val = _pair_from(child)
-            if nm and val and nm not in out:
-                out[nm] = val
+            _store(nm, val)
     return out
 
 

@@ -54,7 +54,7 @@ except Exception:
         return set()
 
 # Shared FAVI look-and-feel (Work Sans, crimson banner, themed cards/pills).
-from branding import inject_css, page_header, render_metric_row, FAVICON_URL
+from branding import inject_css, page_header, render_metric_row
 
 # Safe XML parsing (defusedxml if present)
 try:
@@ -559,10 +559,10 @@ with st.form("input"):
         )
         stop_on_first_parse_error = st.checkbox("Stop on first XML parse error", value=True)
 
-    submitted = st.form_submit_button("Check feed", type="primary", use_container_width=True)
+    submitted = st.form_submit_button("Check feed", type="primary", width="stretch")
 
 if not submitted:
-    st.markdown("© 2025 Raul Bertoldini")
+    st.markdown("© 2026 Raul Bertoldini")
     st.stop()
 
 # 1) Get a file on disk
@@ -1211,7 +1211,7 @@ with st.expander("ClickUp ticket draft (work in progress)", expanded=False):
     st.link_button(
         "Open pre-filled ClickUp form ↗",
         make_clickup_url(_clickup_payload),
-        use_container_width=True,
+        width="stretch",
     )
 
 # ---------- DETAILS ----------
@@ -1437,4 +1437,4 @@ st.caption(
     ("Scope: Sample first N items (streaming)" if use_sample_mode else
      f"Scope: Auto (parser: {'Streaming' if used_streaming else 'DOM'})")
 )
-st.markdown("© 2025 Raul Bertoldini")
+st.markdown("© 2026 Raul Bertoldini")

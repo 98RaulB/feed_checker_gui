@@ -1,3 +1,4 @@
-streamlit
-defusedxml
-requests
+streamlit>=1.50,<2
+defusedxml>=0.7,<1
+requests>=2.32.2,<3
+urllib3>=2,<3
