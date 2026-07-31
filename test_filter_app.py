@@ -58,10 +58,36 @@ class FilterPageAppTests(unittest.TestCase):
     def test_router_boots_both_pages_without_exceptions(self):
         app = AppTest.from_file(str(ROOT / "feed_checker_gui.py")).run(timeout=20)
         self.assertEqual(list(app.exception), [])
-        self.assertIn("Check feed", [button.label for button in app.button])
+        # The Feed Checker page now loads a feed for BOTH validation and browsing.
+        self.assertIn("Load feed", [button.label for button in app.button])
         app.switch_page("filter_page.py").run(timeout=20)
         self.assertEqual(list(app.exception), [])
         self.assertIn("Load feed", [button.label for button in app.button])
+
+    def test_checker_page_validates_and_browses_one_loaded_feed(self):
+        """A single load feeds BOTH tabs on the Feed Checker page: validation
+        renders to completion and the shared filter UI renders, no exception."""
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
+        app.session_state["loaded_feed"] = {
+            "path": self.path,
+            "label": "fixture.xml",
+            "size": len(FIXTURE),
+            "scope": "Auto (full)",
+            "n_limit": 5000,
+            "stop_on_first_parse_error": True,
+        }
+        app.run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+
+        markdown = " ".join(str(m.value) for m in app.markdown)
+        captions = " ".join(str(c.value) for c in app.caption)
+        buttons = [b.label for b in app.button]
+
+        # Validation tab rendered from the loaded feed, through to its end caption.
+        self.assertIn("**Source:**", markdown)
+        self.assertIn("Scope:", captions)
+        # Browse tab rendered the shared filter UI (the render_filter fragment).
+        self.assertIn("🗑 Clear all", buttons)
 
     def test_blank_new_rule_is_ignored_and_downloads_stay_disabled(self):
         app = self._loaded_app()
