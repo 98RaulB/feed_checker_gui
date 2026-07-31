@@ -567,72 +567,6 @@ def url_quality_issue(u: str) -> str:
         return "Non-ASCII characters"
     return ""
 
-# ---------- Load a feed once (used by BOTH tabs) ----------
-with st.form("input"):
-    url = st.text_input("Feed URL", placeholder="https://example.com/feed.xml")
-    up = st.file_uploader("…or upload an XML file (.xml or .xml.gz)", type=["xml", "gz"])
-
-    with st.expander("Advanced options"):
-        scope = st.selectbox("Processing scope", ["Auto (full)", "Sample first N items"])
-        n_limit = st.number_input(
-            "Sample size (items) — used only in sample mode",
-            min_value=100, max_value=200_000, value=5_000, step=500,
-        )
-        stop_on_first_parse_error = st.checkbox("Stop on first XML parse error", value=True)
-
-    submitted = st.form_submit_button("Load feed", type="primary", width="stretch")
-
-# Fetch once on submit and remember the feed so BOTH tabs work off a single load
-# and survive Streamlit reruns. (The old `if not submitted: st.stop()` made the
-# page single-shot — any later interaction wiped the results.)
-if submitted:
-    try:
-        if url.strip():
-            if not url.lower().startswith(("http://", "https://")):
-                st.error("URL must start with http:// or https://"); st.stop()
-            _p, _hash = download_to_tmp(url.strip()); _lbl = url.strip()
-        elif up is not None:
-            _p, _hash = persist_upload(up); _lbl = up.name
-        else:
-            st.warning("Provide a URL or upload a file."); st.stop()
-    except Exception as _e:
-        st.error(f"Could not load feed: {_e}"); st.stop()
-    _sz = os.path.getsize(_p) if os.path.exists(_p) else 0
-    st.session_state["loaded_feed"] = {
-        "path": _p, "label": _lbl, "size": _sz, "content_hash": _hash, "scope": scope,
-        "n_limit": int(n_limit), "stop_on_first_parse_error": bool(stop_on_first_parse_error),
-    }
-    # A changed feed clears stale filter/browse state — handled centrally in
-    # _sync_filter_feed() (keyed by content hash), so no ad-hoc cleanup here.
-
-_feed = st.session_state.get("loaded_feed")
-if not _feed:
-    st.info(
-        "Paste a feed URL or upload a file, then **Load feed** — you can validate it "
-        "and browse/filter it side by side, without reloading."
-    )
-    st.markdown("© 2026 Raul Bertoldini")
-    st.stop()
-
-# Values the validation + parse functions read (module-level, refreshed each run).
-src_path = _feed["path"]
-src_label = _feed["label"]
-file_size = _feed["size"]
-content_hash = _feed.get("content_hash") or f"{_feed['label']}::{_feed['size']}"
-scope = _feed["scope"]
-n_limit = _feed["n_limit"]
-stop_on_first_parse_error = _feed["stop_on_first_parse_error"]
-auto_force_streaming = is_gzip_path(src_path) or (file_size > SMALL_SIZE_LIMIT)
-use_sample_mode = (scope == "Sample first N items")
-
-# Cross-page hand-off: the standalone Feed Filter page can reuse this feed.
-st.session_state["shared_feed_path"] = src_path
-st.session_state["shared_feed_label"] = src_label
-st.session_state["shared_feed_size"] = file_size
-
-st.write(f"**Source:** `{src_label}`")
-
-
 # Data buckets (shared)
 xml_ok = True
 spec_name = "UNKNOWN"
@@ -1528,28 +1462,88 @@ def _prepare_browse_table():
     return st.session_state.get("ff_table")
 
 
-# ---------- Check + browse, side by side ----------
-# One load feeds both panels: validation on the left, live browse/filter on the
-# right — so it's immediately clear the tool does both.
-st.markdown("---")
-col_validate, col_browse = st.columns(2, gap="large")
+# ---------- Load & check (left) · Browse & filter (right) ----------
+# Both halves are visible from the start: the load form + validation on the left,
+# the browse/filter panel on the right (empty until a feed is loaded) — so it reads
+# immediately as "check a feed AND browse it".
+col_left, col_right = st.columns(2, gap="large")
 
-# Render the Browse column first in code so a fatal parse error in Validation
-# (which still st.stop()s) cannot blank out the Browse column.
-with col_browse:
+with col_left:
+    st.subheader("① Load & check")
+    with st.form("input"):
+        url = st.text_input("Feed URL", placeholder="https://example.com/feed.xml")
+        up = st.file_uploader("…or upload an XML file (.xml or .xml.gz)", type=["xml", "gz"])
+        with st.expander("Advanced options"):
+            scope = st.selectbox("Processing scope", ["Auto (full)", "Sample first N items"])
+            n_limit = st.number_input(
+                "Sample size (items) — used only in sample mode",
+                min_value=100, max_value=200_000, value=5_000, step=500,
+            )
+            stop_on_first_parse_error = st.checkbox("Stop on first XML parse error", value=True)
+        submitted = st.form_submit_button("Load feed", type="primary", width="stretch")
+
+# Fetch once on submit and remember the feed so both panels work off one load and
+# survive Streamlit reruns.
+if submitted:
+    try:
+        if url.strip():
+            if not url.lower().startswith(("http://", "https://")):
+                st.error("URL must start with http:// or https://"); st.stop()
+            _p, _hash = download_to_tmp(url.strip()); _lbl = url.strip()
+        elif up is not None:
+            _p, _hash = persist_upload(up); _lbl = up.name
+        else:
+            st.warning("Provide a URL or upload a file."); st.stop()
+    except Exception as _e:
+        st.error(f"Could not load feed: {_e}"); st.stop()
+    _sz = os.path.getsize(_p) if os.path.exists(_p) else 0
+    st.session_state["loaded_feed"] = {
+        "path": _p, "label": _lbl, "size": _sz, "content_hash": _hash, "scope": scope,
+        "n_limit": int(n_limit), "stop_on_first_parse_error": bool(stop_on_first_parse_error),
+    }
+
+_feed = st.session_state.get("loaded_feed")
+if _feed:
+    # Values the validation + parse functions read (module-level, refreshed each run).
+    src_path = _feed["path"]
+    src_label = _feed["label"]
+    file_size = _feed["size"]
+    content_hash = _feed.get("content_hash") or f"{_feed['label']}::{_feed['size']}"
+    scope = _feed["scope"]
+    n_limit = _feed["n_limit"]
+    stop_on_first_parse_error = _feed["stop_on_first_parse_error"]
+    auto_force_streaming = is_gzip_path(src_path) or (file_size > SMALL_SIZE_LIMIT)
+    use_sample_mode = (scope == "Sample first N items")
+    # Cross-page hand-off: the standalone Feed Filter page can reuse this feed.
+    st.session_state["shared_feed_path"] = src_path
+    st.session_state["shared_feed_label"] = src_label
+    st.session_state["shared_feed_size"] = file_size
+
+# Browse panel (right) — rendered before validation so a fatal parse error in
+# validation (which still st.stop()s) can't blank it. Empty until a feed loads.
+with col_right:
     st.subheader("🔎 Browse & filter")
-    st.caption("Build AND/OR rules and see how many products remain — live.")
-    _browse_table = _prepare_browse_table()
-    if _browse_table is None:
-        pass
-    elif _browse_table.spec == "UNKNOWN":
-        st.warning("Format not recognized — nothing to filter. See Validation on the left.")
-    elif _browse_table.n == 0:
-        st.info("No items were found to filter.")
+    if not _feed:
+        st.caption("Build AND/OR rules and see how many products remain — live.")
+        st.info("⬅︎ Load a feed on the left to browse and filter it here.")
     else:
-        render_filter()
+        _browse_table = _prepare_browse_table()
+        if _browse_table is None:
+            pass
+        elif _browse_table.spec == "UNKNOWN":
+            st.warning("Format not recognized — nothing to filter. See Validation on the left.")
+        elif _browse_table.n == 0:
+            st.info("No items were found to filter.")
+        else:
+            render_filter()
 
-with col_validate:
-    st.subheader("✅ Validation")
-    st.caption("Format, required fields, prices, duplicates and recommended elements.")
-    render_validation()
+# Validation (left, below the load form).
+with col_left:
+    if not _feed:
+        st.caption(
+            "Paste a feed URL or upload a file, then **Load feed** — it's validated here "
+            "and becomes browsable on the right."
+        )
+    else:
+        st.write(f"**Source:** `{src_label}`")
+        render_validation()
