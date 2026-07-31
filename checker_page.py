@@ -1483,24 +1483,30 @@ with col_left:
         submitted = st.form_submit_button("Load feed", type="primary", width="stretch")
 
 # Fetch once on submit and remember the feed so both panels work off one load and
-# survive Streamlit reruns.
+# survive Streamlit reruns. A failed submit must NOT st.stop(): that would blank
+# the browse panel — and any already-loaded feed's results — for the whole run.
+# Record the problem and show it under the form instead.
+_load_error = None
 if submitted:
+    _p = None
     try:
         if url.strip():
             if not url.lower().startswith(("http://", "https://")):
-                st.error("URL must start with http:// or https://"); st.stop()
+                raise ValueError("URL must start with http:// or https://")
             _p, _hash = download_to_tmp(url.strip()); _lbl = url.strip()
         elif up is not None:
             _p, _hash = persist_upload(up); _lbl = up.name
         else:
-            st.warning("Provide a URL or upload a file."); st.stop()
+            _load_error = ("warning", "Provide a URL or upload a file.")
     except Exception as _e:
-        st.error(f"Could not load feed: {_e}"); st.stop()
-    _sz = os.path.getsize(_p) if os.path.exists(_p) else 0
-    st.session_state["loaded_feed"] = {
-        "path": _p, "label": _lbl, "size": _sz, "content_hash": _hash, "scope": scope,
-        "n_limit": int(n_limit), "stop_on_first_parse_error": bool(stop_on_first_parse_error),
-    }
+        _p = None
+        _load_error = ("error", f"Could not load feed: {_e}")
+    if _p:
+        _sz = os.path.getsize(_p) if os.path.exists(_p) else 0
+        st.session_state["loaded_feed"] = {
+            "path": _p, "label": _lbl, "size": _sz, "content_hash": _hash, "scope": scope,
+            "n_limit": int(n_limit), "stop_on_first_parse_error": bool(stop_on_first_parse_error),
+        }
 
 _feed = st.session_state.get("loaded_feed")
 if _feed:
@@ -1522,7 +1528,7 @@ if _feed:
 # Browse panel (right) — rendered before validation so a fatal parse error in
 # validation (which still st.stop()s) can't blank it. Empty until a feed loads.
 with col_right:
-    st.subheader("🔎 Browse & filter")
+    st.subheader("② Browse & filter")
     if not _feed:
         st.caption("Build AND/OR rules and see how many products remain — live.")
         st.info("⬅︎ Load a feed on the left to browse and filter it here.")
@@ -1539,6 +1545,8 @@ with col_right:
 
 # Validation (left, below the load form).
 with col_left:
+    if _load_error:
+        (st.warning if _load_error[0] == "warning" else st.error)(_load_error[1])
     if not _feed:
         st.caption(
             "Paste a feed URL or upload a file, then **Load feed** — it's validated here "

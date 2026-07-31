@@ -120,6 +120,38 @@ class FilterPageAppTests(unittest.TestCase):
         # Browse tab still rendered (did not crash on the stale multiselect value).
         self.assertIn("🗑 Clear all", [b.label for b in app.button])
 
+    def test_failed_submit_keeps_both_panels_alive(self):
+        """A bad submit (typo'd URL) must not blank the page: the error renders
+        under the form and the already-loaded feed's validation + browse panels
+        stay on screen (no st.stop() on the load path)."""
+        digest = hashlib.sha256(FIXTURE).hexdigest()
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
+        app.session_state["loaded_feed"] = {
+            "path": self.path, "label": "fixture.xml", "size": len(FIXTURE),
+            "content_hash": digest, "scope": "Auto (full)",
+            "n_limit": 5000, "stop_on_first_parse_error": True,
+        }
+        app.run(timeout=20)
+        app.text_input[0].set_value("ftp://bad.example/feed.xml")
+        next(b for b in app.button if b.label == "Load feed").click()
+        app.run(timeout=20)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(any("http://" in e.value for e in app.error))
+        markdown = " ".join(str(m.value) for m in app.markdown)
+        self.assertIn("**Source:**", markdown)  # validation survived the bad submit
+        self.assertIn("🗑 Clear all", [b.label for b in app.button])  # browse survived
+
+    def test_empty_submit_keeps_browse_placeholder(self):
+        """Clicking Load feed with nothing filled shows a warning but keeps the
+        right-half Browse placeholder visible (the page never half-disappears)."""
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py")).run(timeout=20)
+        next(b for b in app.button if b.label == "Load feed").click()
+        app.run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(any("Provide a URL" in w.value for w in app.warning))
+        self.assertIn("② Browse & filter", [s.value for s in app.subheader])
+
     def test_blank_new_rule_is_ignored_and_downloads_stay_disabled(self):
         app = self._loaded_app()
         next(button for button in app.button if button.label == "➕ Add rule").click()

@@ -10,9 +10,9 @@ discipline (columnar + capped) is deliberate, not incidental.
 | File | Role |
 |---|---|
 | `feed_checker_gui.py` | Entry point / `st.navigation` router. Calls `st.set_page_config` **once** (before navigation), then mounts the two pages. |
-| `checker_page.py` | **Unified page** (default). Loads a feed once, then `st.tabs(["✅ Validation","🔎 Browse & filter"])`. Owns the validator: parse (DOM ≤30 MB / streaming), ~30 accumulators, `render_validation()`, and the ClickUp draft. Browse tab parses the same feed into a table and calls `filter_view.render_filter()`. |
+| `checker_page.py` | **Unified page** (default). Full-width, two `st.columns` visible from the start: **left** "① Load & check" (the load form; after a load, validation renders beneath it), **right** "② Browse & filter" (empty-state hint until a feed loads, then the shared filter UI). One load feeds both halves. Owns the validator: parse (DOM ≤30 MB / streaming), ~30 accumulators, `render_validation()`, and the ClickUp draft. A failed submit never `st.stop()`s — the error renders under the form so an already-loaded feed's panels stay on screen. |
 | `filter_page.py` | Thin standalone "Feed Filter" page: its own loader (SSRF-safe download, gate, parse → `ff_table`) then `filter_view.render_filter()`. Kept as a page so `switch_page("filter_page.py")` in the tests still resolves. |
-| `filter_view.py` | **Shared** rule builder → live counts → browse/preview → hand-off exports, wrapped in `@st.fragment render_filter()`. Reads `st.session_state["ff_table"]` + feed identity. Both the checker's Browse tab and `filter_page.py` call it. |
+| `filter_view.py` | **Shared** rule builder → live counts → browse/preview → hand-off exports, wrapped in `@st.fragment render_filter()`. Reads `st.session_state["ff_table"]` + feed identity. Both the checker's Browse column and `filter_page.py` call it. |
 | `feed_filter.py` | Pure engine (no Streamlit): `extract()` → capped columnar `FeedTable`; `apply_rule_groups()`, `category_facets()`, `browse_mask()`, `describe_rule_groups()`, `to_group_spec()`; SSRF helpers (`public_url_ips`, `assert_public_url`) and parse-size limits. The piece that moves to Cloud Run. |
 | `safe_http.py` | `public_session()` → requests session with a `PinnedPublicAdapter` (resolve once, reject private/reserved IPs, pin the connection to that IP, verify the original TLS hostname, ignore env proxies). SSRF defense for feed downloads. |
 | `feed_specs.py` | Feed-format detection + field readers (Heureka, Google, Ceneo, Compari, …). Shared by validator and engine so extracted values always agree with the checker. |
@@ -35,8 +35,9 @@ The unified page fixes this with two moves:
    re-executed or blanked. Validation re-runs only on a genuine full re-run
    (new load, param-index toggle, ClickUp edit).
 
-The Browse tab is rendered **before** Validation in code so a fatal parse error
-in validation (which still `st.stop()`s) cannot blank the Browse tab.
+The Browse column is rendered **before** Validation in code so a fatal parse
+error in validation (which still `st.stop()`s) cannot blank the Browse panel.
+Feed-**load** failures (bad URL, download error) never `st.stop()` at all.
 
 ## Feed loading & parsing
 
@@ -71,7 +72,7 @@ in validation (which still `st.stop()`s) cannot blank the Browse tab.
 - `python -m unittest discover` (GitHub Actions `.github/workflows/ci.yml`, Python 3.12).
 - `test_filter_app.py` drives the real app via `streamlit.testing.v1.AppTest`:
   boot `feed_checker_gui.py`, then either `switch_page("filter_page.py")` or inject
-  `loaded_feed` to exercise the checker's tabs. Fragment reruns work under AppTest.
+  `loaded_feed` to exercise the checker's two panels. Fragment reruns work under AppTest.
 - `test_feed_filter.py` (engine), `test_safe_http.py` (SSRF adapter), `test_feed_specs.py`.
 
 ## Known follow-ups
