@@ -1,0 +1,84 @@
+# FAVI Feed Tools — architecture
+
+A Streamlit app that lets Account Managers **validate** a product feed and
+**browse/filter** it from one load, plus a pure-Python filtering engine destined
+for Cloud Run. Deployed on **Streamlit Community Cloud (~1 GB RAM/app)** — memory
+discipline (columnar + capped) is deliberate, not incidental.
+
+## Module map
+
+| File | Role |
+|---|---|
+| `feed_checker_gui.py` | Entry point / `st.navigation` router. Calls `st.set_page_config` **once** (before navigation), then mounts the two pages. |
+| `checker_page.py` | **Unified page** (default). Loads a feed once, then `st.tabs(["✅ Validation","🔎 Browse & filter"])`. Owns the validator: parse (DOM ≤30 MB / streaming), ~30 accumulators, `render_validation()`, and the ClickUp draft. Browse tab parses the same feed into a table and calls `filter_view.render_filter()`. |
+| `filter_page.py` | Thin standalone "Feed Filter" page: its own loader (SSRF-safe download, gate, parse → `ff_table`) then `filter_view.render_filter()`. Kept as a page so `switch_page("filter_page.py")` in the tests still resolves. |
+| `filter_view.py` | **Shared** rule builder → live counts → browse/preview → hand-off exports, wrapped in `@st.fragment render_filter()`. Reads `st.session_state["ff_table"]` + feed identity. Both the checker's Browse tab and `filter_page.py` call it. |
+| `feed_filter.py` | Pure engine (no Streamlit): `extract()` → capped columnar `FeedTable`; `apply_rule_groups()`, `category_facets()`, `browse_mask()`, `describe_rule_groups()`, `to_group_spec()`; SSRF helpers (`public_url_ips`, `assert_public_url`) and parse-size limits. The piece that moves to Cloud Run. |
+| `safe_http.py` | `public_session()` → requests session with a `PinnedPublicAdapter` (resolve once, reject private/reserved IPs, pin the connection to that IP, verify the original TLS hostname, ignore env proxies). SSRF defense for feed downloads. |
+| `feed_specs.py` | Feed-format detection + field readers (Heureka, Google, Ceneo, Compari, …). Shared by validator and engine so extracted values always agree with the checker. |
+| `branding.py` | FAVI look-and-feel: `inject_css`, `page_header`, `render_metric_row`. |
+
+## Why one page needs `st.fragment`
+
+Streamlit re-runs the whole script on every interaction. The validator was
+historically **single-shot** (`if not submitted: st.stop()`), so its results only
+existed on the run right after submit — any later widget wiped them. Live
+filtering is *nonstop* interaction, which is why it started as a separate page.
+
+The unified page fixes this with two moves:
+1. **Persist the load.** On submit the feed is stored in
+   `st.session_state["loaded_feed"]`; a gate stops only when nothing is loaded.
+   So any full re-run still shows results (this also fixes the old ClickUp-draft
+   ephemerality).
+2. **Isolate filtering.** `render_filter()` is an `@st.fragment`, so filter
+   interactions re-run **only that fragment** — the validation view is never
+   re-executed or blanked. Validation re-runs only on a genuine full re-run
+   (new load, param-index toggle, ClickUp edit).
+
+The Browse tab is rendered **before** Validation in code so a fatal parse error
+in validation (which still `st.stop()`s) cannot blank the Browse tab.
+
+## Feed loading & parsing
+
+- One download per load. Uploads → temp file; URLs → temp file **over
+  `safe_http.public_session()`** (SSRF-safe: pinned public IP, redirect hops
+  re-validated). Temp files use `delete=False` (they must outlive the request;
+  `filter_page.py` also runs a flock-leased temp-file janitor).
+- On a **feed change** (new content hash), the checker's `_sync_filter_feed()`
+  wipes all `ff_*` rule/browse state so rules/category multiselects built against
+  the previous feed can't carry over (a stale category would crash the Browse
+  multiselect), then `_prepare_browse_table()` sets the full, consistent feed
+  identity (`ff_signature`/`ff_src_path`/`ff_content_hash`=real sha256/…).
+- **Two parses of the same file**: the validator's own parse (accumulators) and
+  `feed_filter.extract()` (columnar `FeedTable`, cached by content signature in
+  `st.session_state["ff_table"]`). One-time cost on load; filter interactions
+  hit the cached table.
+- Memory: `FeedTable` is columnar + interned + capped (`DEFAULT_ITEM_CAP`), so a
+  full snapshot is well under the ~1 GB host budget. Counts are exact within the
+  snapshot; beyond the cap the UI says it's a sample.
+
+## Key `st.session_state` keys
+
+- `loaded_feed` — the checker's persisted feed `{path,label,size,scope,n_limit,stop_on_first_parse_error}`.
+- `ff_table` / `ff_table_signature` — the parsed `FeedTable` and its content signature (drives re-parse).
+- `ff_src_label` / `ff_content_hash` — feed identity for the hand-off export snapshot.
+- `ff_index_params_cb` — "index product parameters" toggle (changes the signature → re-parse).
+- `ff_rules` / `ff_group_ids` / `ff_groups_combine` / `ff_mode` … — rule-builder state (owned by `render_filter`).
+- `shared_feed_path` / `shared_feed_label` / `shared_feed_size` — cross-page hand-off so the standalone Feed Filter page can reuse a checked feed.
+
+## Tests & CI
+
+- `python -m unittest discover` (GitHub Actions `.github/workflows/ci.yml`, Python 3.12).
+- `test_filter_app.py` drives the real app via `streamlit.testing.v1.AppTest`:
+  boot `feed_checker_gui.py`, then either `switch_page("filter_page.py")` or inject
+  `loaded_feed` to exercise the checker's tabs. Fragment reruns work under AppTest.
+- `test_feed_filter.py` (engine), `test_safe_http.py` (SSRF adapter), `test_feed_specs.py`.
+
+## Known follow-ups
+
+- **Validation re-parses on every full re-run** (e.g. editing the ClickUp draft or
+  toggling the param-index checkbox re-runs the whole script, since those widgets
+  live outside the Browse `@st.fragment`). Correct output, but a repeated multi-
+  second stall on very large feeds. Fix: memoize the parse/accumulators by content
+  signature (the pattern `_prepare_browse_table` already uses). Filtering itself is
+  fragment-isolated and does **not** trigger this.

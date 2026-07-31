@@ -8,8 +8,9 @@ import gzip
 import tempfile
 import json
 import base64
+import hashlib
 import streamlit as st
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 # Shared rules/helpers from your feed_specs.py
 from feed_specs import (
@@ -57,6 +58,7 @@ except Exception:
 from branding import inject_css, page_header, render_metric_row
 import feed_filter as ff
 from filter_view import render_filter
+from safe_http import public_session
 
 # Safe XML parsing (defusedxml if present)
 try:
@@ -379,37 +381,55 @@ _DOWNLOAD_HEADERS = {
     "Accept-Encoding": "gzip, deflate",
 }
 
-def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> str:
-    """Stream a URL to a temp file (no giant bytes in memory). Returns file path."""
-    import requests
-    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT, headers=_DOWNLOAD_HEADERS) as r:
-        r.raise_for_status()
-        ctype = r.headers.get("Content-Type","").lower()
-        size_hdr = int(r.headers.get("Content-Length") or 0)
+# SSRF-safe session: resolves once, rejects private/reserved IPs, pins the
+# connection to that IP (defeats DNS-rebinding), verifies the TLS hostname, and
+# ignores env proxies — the same defense the Feed Filter page uses.
+_HTTP_SESSION = public_session()
 
-        suffix = ".xml.gz" if ("gzip" in ctype or url.lower().endswith(".gz")) else ".xml"
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-        written = 0
-        for chunk_bytes in r.iter_content(chunk_size=chunk):
-            if chunk_bytes:
-                tmp.write(chunk_bytes)
-                written += len(chunk_bytes)
-        tmp.flush(); tmp.close()
 
-        effective_size = written or size_hdr
-        if effective_size and effective_size > SMALL_SIZE_LIMIT:
-            st.warning(f"Large feed detected: ~{effective_size/1024/1024:.0f} MB. Using streaming parser.")
-        return tmp.name
+def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> tuple[str, str]:
+    """Stream a URL to a temp file over the pinned public session, validating
+    every redirect hop against the SSRF policy. Returns (path, sha256)."""
+    current_url = url
+    for _hop in range(6):  # up to 5 redirects, each re-validated by the session
+        with _HTTP_SESSION.get(
+            current_url, stream=True, timeout=(15, REQUEST_TIMEOUT),
+            headers=_DOWNLOAD_HEADERS, allow_redirects=False,
+        ) as r:
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("Location")
+                if not loc:
+                    raise ValueError("The feed URL redirected without a destination.")
+                current_url = urljoin(current_url, loc)
+                continue
+            r.raise_for_status()
+            ctype = r.headers.get("Content-Type", "").lower()
+            size_hdr = int(r.headers.get("Content-Length") or 0)
+            suffix = ".xml.gz" if ("gzip" in ctype or current_url.lower().split("?", 1)[0].endswith(".gz")) else ".xml"
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            written = 0
+            digest = hashlib.sha256()
+            for chunk_bytes in r.iter_content(chunk_size=chunk):
+                if chunk_bytes:
+                    tmp.write(chunk_bytes)
+                    digest.update(chunk_bytes)
+                    written += len(chunk_bytes)
+            tmp.flush(); tmp.close()
 
-def persist_upload(up) -> str:
-    """Save an uploaded file to disk and return the path."""
-    head = up.read(2); up.seek(0)
-    is_gz = head == b"\x1f\x8b"
+            effective_size = written or size_hdr
+            if effective_size and effective_size > SMALL_SIZE_LIMIT:
+                st.warning(f"Large feed detected: ~{effective_size/1024/1024:.0f} MB. Using streaming parser.")
+            return tmp.name, digest.hexdigest()
+    raise ValueError("The feed URL exceeded 5 redirects.")
+
+def persist_upload(up) -> tuple[str, str]:
+    """Save an uploaded file to disk. Returns (path, sha256)."""
+    data = up.read(); up.seek(0)
+    is_gz = data[:2] == b"\x1f\x8b"
     suffix = ".xml.gz" if is_gz or (up.name and up.name.lower().endswith(".gz")) else ".xml"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(up.read()); tmp.flush(); tmp.close()
-    up.seek(0)
-    return tmp.name
+    tmp.write(data); tmp.flush(); tmp.close()
+    return tmp.name, hashlib.sha256(data).hexdigest()
 
 def is_gzip_path(path: str) -> bool:
     try:
@@ -567,20 +587,20 @@ if submitted:
         if url.strip():
             if not url.lower().startswith(("http://", "https://")):
                 st.error("URL must start with http:// or https://"); st.stop()
-            _p, _lbl = download_to_tmp(url.strip()), url.strip()
+            _p, _hash = download_to_tmp(url.strip()); _lbl = url.strip()
         elif up is not None:
-            _p, _lbl = persist_upload(up), up.name
+            _p, _hash = persist_upload(up); _lbl = up.name
         else:
             st.warning("Provide a URL or upload a file."); st.stop()
     except Exception as _e:
         st.error(f"Could not load feed: {_e}"); st.stop()
     _sz = os.path.getsize(_p) if os.path.exists(_p) else 0
     st.session_state["loaded_feed"] = {
-        "path": _p, "label": _lbl, "size": _sz, "scope": scope,
+        "path": _p, "label": _lbl, "size": _sz, "content_hash": _hash, "scope": scope,
         "n_limit": int(n_limit), "stop_on_first_parse_error": bool(stop_on_first_parse_error),
     }
-    for _k in ("ff_table", "ff_table_signature", "ff_category_facets", "ff_prepared_exports"):
-        st.session_state.pop(_k, None)
+    # A changed feed clears stale filter/browse state — handled centrally in
+    # _sync_filter_feed() (keyed by content hash), so no ad-hoc cleanup here.
 
 _feed = st.session_state.get("loaded_feed")
 if not _feed:
@@ -595,6 +615,7 @@ if not _feed:
 src_path = _feed["path"]
 src_label = _feed["label"]
 file_size = _feed["size"]
+content_hash = _feed.get("content_hash") or f"{_feed['label']}::{_feed['size']}"
 scope = _feed["scope"]
 n_limit = _feed["n_limit"]
 stop_on_first_parse_error = _feed["stop_on_first_parse_error"]
@@ -1456,25 +1477,49 @@ def render_validation():
     st.markdown("© 2026 Raul Bertoldini")
 
 
+def _sync_filter_feed(feed_hash: str) -> None:
+    """When the loaded feed changes, wipe ALL filter/browse rule state so rules,
+    category multiselects and browse settings built against the previous feed
+    cannot carry over (a stale category absent from the new feed's options would
+    otherwise crash the Browse multiselect). Mirrors filter_page._set_feed's
+    cleanup for the Checker's own load path. Keeps only the param-index checkbox."""
+    if st.session_state.get("ff_rules_feed") == feed_hash:
+        return
+    for _k in [
+        k for k in list(st.session_state.keys())
+        if isinstance(k, str) and k.startswith("ff_") and k != "ff_index_params_cb"
+    ]:
+        st.session_state.pop(_k, None)
+    st.session_state["ff_rules_feed"] = feed_hash
+
+
 def _prepare_browse_table():
     """Parse the loaded feed into ff_table so the shared filter UI can run
-    against it. Cached by a content signature; re-parses only when the feed or
-    the param-index toggle changes."""
+    against it. Cached by content signature; re-parses only when the feed or the
+    param-index toggle changes, and sets the FULL, consistent feed identity the
+    shared filter UI + hand-off export read (ff_signature/ff_src_path/... so a
+    later hop to the Feed Filter page describes this exact feed)."""
+    _sync_filter_feed(content_hash)
     index_params = st.checkbox(
         "Also index product parameters (enables the Product-parameter filter)",
         key="ff_index_params_cb",
     )
-    sig = f"{src_label}::{file_size}::p{int(index_params)}"
+    sig = f"{content_hash}::p{int(index_params)}"
     if st.session_state.get("ff_table_signature") != sig:
         try:
             _tbl = ff.extract(src_path, index_params=index_params)
         except Exception as _e:
             st.error(f"Could not parse feed for filtering: {_e}")
             return None
-        st.session_state["ff_table"] = _tbl
-        st.session_state["ff_table_signature"] = sig
-        st.session_state["ff_src_label"] = src_label
-        st.session_state["ff_content_hash"] = sig
+        st.session_state.update(
+            ff_table=_tbl,
+            ff_table_signature=sig,
+            ff_signature=sig,
+            ff_src_path=src_path,
+            ff_src_label=src_label,
+            ff_src_size=file_size,
+            ff_content_hash=content_hash,
+        )
         st.session_state.pop("ff_category_facets", None)
         st.session_state.pop("ff_prepared_exports", None)
     return st.session_state.get("ff_table")

@@ -89,6 +89,37 @@ class FilterPageAppTests(unittest.TestCase):
         # Browse tab rendered the shared filter UI (the render_filter fragment).
         self.assertIn("🗑 Clear all", buttons)
 
+    def test_new_feed_on_checker_clears_stale_filter_state(self):
+        """Switching feeds on the Checker wipes rule/browse state built against the
+        previous feed, so a stale category can't carry over or crash the Browse tab."""
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
+        app.session_state["loaded_feed"] = {
+            "path": self.path, "label": "fixture.xml", "size": len(FIXTURE),
+            "content_hash": "feedB", "scope": "Auto (full)",
+            "n_limit": 5000, "stop_on_first_parse_error": True,
+        }
+        # Stale rule/browse state left over from a different feed ("feedA").
+        app.session_state["ff_rules_feed"] = "feedA"
+        app.session_state["ff_rules"] = [99]
+        app.session_state["ff_group_ids"] = [0]
+        app.session_state["ff_cat_values_0"] = ["Ghost category not in feed B"]
+        app.session_state["ff_browse_categories"] = ["Ghost category not in feed B"]
+        app.run(timeout=20)
+
+        ss = app.session_state
+        self.assertEqual(list(app.exception), [])
+        # Feed changed → state re-synced to the new feed and the stale values dropped.
+        self.assertEqual(ss["ff_rules_feed"], "feedB")
+        stale = ["Ghost category not in feed B"]
+        if "ff_cat_values_0" in ss:
+            self.assertNotEqual(ss["ff_cat_values_0"], stale)
+        if "ff_browse_categories" in ss:
+            self.assertNotEqual(ss["ff_browse_categories"], stale)
+        if "ff_rules" in ss:
+            self.assertNotEqual(ss["ff_rules"], [99])
+        # Browse tab still rendered (did not crash on the stale multiselect value).
+        self.assertIn("🗑 Clear all", [b.label for b in app.button])
+
     def test_blank_new_rule_is_ignored_and_downloads_stay_disabled(self):
         app = self._loaded_app()
         next(button for button in app.button if button.label == "➕ Add rule").click()
