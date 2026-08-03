@@ -72,8 +72,8 @@ inject_css()
 # block styles the page wherever it lands, so it can wait for the toggle.
 page_header(
     "Feed Checker",
-    subtitle="Check a product feed for FAVI and browse/filter it in one view — "
-             "validation on the left, live rule-based browsing on the right.",
+    subtitle="Check a product feed for FAVI — then switch on the Browse & filter "
+             "panel to explore the same feed and build rules beside the results.",
 )
 st.warning("🚧 **Beta** — more fixes and functionality coming soon.")
 
@@ -1432,8 +1432,10 @@ def _prepare_browse_table():
     against it. Cached by content signature; re-parses only when the feed or the
     param-index toggle changes, and sets the FULL, consistent feed identity the
     shared filter UI + hand-off export read (ff_signature/ff_src_path/... so a
-    later hop to the Feed Filter page describes this exact feed)."""
-    _sync_filter_feed(content_hash)
+    later hop to the Feed Filter page describes this exact feed).
+
+    Assumes _sync_filter_feed() already ran for this feed — it is called on the
+    load path, not here, so a collapsed panel still invalidates stale state."""
     index_params = st.checkbox(
         "Also index product parameters (enables the Product-parameter filter)",
         key="ff_index_params_cb",
@@ -1460,26 +1462,32 @@ def _prepare_browse_table():
 
 
 # ---------- Load & check (left) · Browse & filter (right) ----------
-# Both halves are visible from the start: the load form + validation on the left,
-# the browse/filter panel on the right (empty until a feed is loaded) — so it reads
-# immediately as "check a feed AND browse it".
+# Checking is the common case, so the page opens as a single full-measure column:
+# the load form with validation beneath it. Switching the panel on splits the page
+# into halves — load/check left, browse/filter right — off ONE feed load.
 #
 # The panel is a toggle rather than an expander around the right half: st.columns
 # fixes its widths when it is created, so an expander would only collapse
 # vertically and leave validation stranded at half width. Reclaiming the space
 # means choosing the split up front — hence a control ABOVE the columns.
+#
+# Streamlit drops widget state for widgets the current page didn't render, so the
+# toggle alone would forget an AM's choice every time they visit the Feed Filter
+# page and come back. checker_browse_pref is a plain (non-widget) key, which does
+# survive a page switch, so it carries the choice back in as the toggle's default.
 show_browse = st.toggle(
     "Browse & filter panel",
-    value=False,
+    value=bool(st.session_state.get("checker_browse_pref", False)),
     key="checker_show_browse",
-    help="Turn off to give validation the whole page width — the metric row and "
-         "issue tables stop wrapping on a laptop screen. The loaded feed stays "
-         "loaded, so switching it back on costs nothing.",
+    help="Switch on to browse the loaded feed and build AND/OR filter rules beside "
+         "the validation results. Off by default so validation gets the whole page "
+         "width — the metric row and issue tables don't wrap on a laptop screen.",
 )
+st.session_state["checker_browse_pref"] = show_browse
 
 # Side by side needs every pixel. Check-only would sprawl at 100% on a big
-# monitor, so it falls back to the same measure as the rest of the app
-# (branding.py's 1200px, which this rule overrides while side by side).
+# monitor, so it stays at the same measure as the rest of the app (branding.py's
+# 1200px, which this rule overrides only while side by side).
 st.markdown(
     "<style>.block-container{"
     f"max-width:{'100%' if show_browse else '1200px'} !important;"
@@ -1550,6 +1558,12 @@ if _feed:
     st.session_state["shared_feed_path"] = src_path
     st.session_state["shared_feed_label"] = src_label
     st.session_state["shared_feed_size"] = file_size
+    # Invalidate rule/browse state built against a DIFFERENT feed here, on the
+    # load path — not inside the Browse panel. The panel is hidden by default, so
+    # leaving this to _prepare_browse_table() would let feed A's ff_* state (and
+    # the ff_table the Feed Filter page reads) survive a switch to feed B
+    # whenever the panel happened to be collapsed. Cheap: clears keys, no parse.
+    _sync_filter_feed(content_hash)
 
 # Browse panel (right) — rendered before validation so a fatal parse error in
 # validation (which still st.stop()s) can't blank it. Empty until a feed loads.
@@ -1580,7 +1594,7 @@ with col_left:
         st.caption(
             "Paste a feed URL or upload a file, then **Load feed** — it's validated here "
             + ("and becomes browsable on the right." if show_browse
-               else "(and becomes browsable once you switch the panel back on).")
+               else "(switch on **Browse & filter panel** above to explore it too).")
         )
     else:
         st.write(f"**Source:** `{src_label}`")

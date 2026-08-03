@@ -10,7 +10,7 @@ discipline (columnar + capped) is deliberate, not incidental.
 | File | Role |
 |---|---|
 | `feed_checker_gui.py` | Entry point / `st.navigation` router. Calls `st.set_page_config` **once** (before navigation), then mounts the two pages. |
-| `checker_page.py` | **Unified page** (default). Full-width, two `st.columns` visible from the start: **left** "① Load & check" (the load form; after a load, validation renders beneath it), **right** "② Browse & filter" (empty-state hint until a feed loads, then the shared filter UI). One load feeds both halves. The right half is **collapsible** — see below. Owns the validator: parse (DOM ≤30 MB / streaming), ~30 accumulators, `render_validation()`, and the ClickUp draft. A failed submit never `st.stop()`s — the error renders under the form so an already-loaded feed's panels stay on screen. |
+| `checker_page.py` | **Unified page** (default). Opens check-only at 1200px: the load form with validation beneath it. Switching on the **Browse & filter panel** splits the page into two `st.columns` — **left** "① Load & check", **right** "② Browse & filter" (empty-state hint until a feed loads, then the shared filter UI) — at full window width, off ONE feed load. See "The Browse half is opt-in" below. Owns the validator: parse (DOM ≤30 MB / streaming), ~30 accumulators, `render_validation()`, and the ClickUp draft. A failed submit never `st.stop()`s — the error renders under the form so an already-loaded feed's panels stay on screen. |
 | `filter_page.py` | Thin standalone "Feed Filter" page: its own loader (SSRF-safe download, gate, parse → `ff_table`) then `filter_view.render_filter()`. Kept as a page so `switch_page("filter_page.py")` in the tests still resolves. |
 | `filter_view.py` | **Shared** rule builder → live counts → browse/preview → hand-off exports, wrapped in `@st.fragment render_filter()`. Reads `st.session_state["ff_table"]` + feed identity. Both the checker's Browse column and `filter_page.py` call it. |
 | `feed_filter.py` | Pure engine (no Streamlit): `extract()` → capped columnar `FeedTable`; `apply_rule_groups()`, `category_facets()`, `browse_mask()`, `describe_rule_groups()`, `to_group_spec()`; SSRF helpers (`public_url_ips`, `assert_public_url`) and parse-size limits. The piece that moves to Cloud Run. |
@@ -39,24 +39,38 @@ The Browse column is rendered **before** Validation in code so a fatal parse
 error in validation (which still `st.stop()`s) cannot blank the Browse panel.
 Feed-**load** failures (bad URL, download error) never `st.stop()` at all.
 
-## Collapsing the Browse half
+## The Browse half is opt-in
 
 `st.columns` fixes its widths when it is created, so an expander *inside* the
 right column would only collapse vertically — validation would stay stranded at
 half width. Reclaiming the space means deciding the split up front, so the
-`show_browse` toggle (`key="checker_show_browse"`, default **on**) renders
-**above** the columns and drives three things:
+`show_browse` toggle (`key="checker_show_browse"`, default **off** — checking is
+the common case) renders **above** the columns and drives three things:
 
 - the layout: `st.columns(2)` when on, a single `st.container()` when off;
-- `.block-container` `max-width`: `100%` side by side, back to branding's
-  `1200px` when check-only (full width alone would sprawl on a large monitor —
-  the point of collapsing is a readable measure on a laptop);
-- whether the Browse block runs at all — collapsed skips
+- `.block-container` `max-width`: `100%` side by side, otherwise branding's
+  `1200px` (full width alone would sprawl on a large monitor — the point of
+  check-only is a readable measure on a laptop);
+- whether the Browse block runs at all — hidden skips
   `_prepare_browse_table()`, so a check-only run never pays for the second parse.
+
+Two consequences of the panel being off by default:
+
+- **The choice must be remembered explicitly.** Streamlit drops widget state for
+  widgets the current page didn't render, so after a hop to the Feed Filter page
+  the toggle would re-default and silently close the panel. `show_browse` is
+  mirrored into `checker_browse_pref`, a plain (non-widget) key that survives a
+  page switch, and that is what feeds the toggle's `value=`.
+- **`_sync_filter_feed()` runs on the load path, not in the panel.** It used to
+  live in `_prepare_browse_table()`; with the panel hidden by default that let
+  feed A's `ff_*` state (and the `ff_table` the Feed Filter page reads) survive a
+  switch to feed B. It only clears keys — no parse — so calling it on every load
+  is cheap. `test_new_feed_on_checker_clears_stale_filter_state` covers both
+  panel states.
 
 `loaded_feed` and `ff_rules` are plain session-state keys, so the loaded feed and
 the rule list survive a collapse; widget-keyed values inside `render_filter()`
-may be re-defaulted, and a re-expand simply re-parses via the signature check.
+may be re-defaulted, and re-opening simply re-parses via the signature check.
 
 ## Feed loading & parsing
 

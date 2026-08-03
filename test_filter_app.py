@@ -66,7 +66,8 @@ class FilterPageAppTests(unittest.TestCase):
 
     def test_checker_page_validates_and_browses_one_loaded_feed(self):
         """A single load feeds BOTH tabs on the Feed Checker page: validation
-        renders to completion and the shared filter UI renders, no exception."""
+        renders to completion and the shared filter UI renders, no exception.
+        The Browse panel is off by default, so this opts in explicitly."""
         app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
         app.session_state["loaded_feed"] = {
             "path": self.path,
@@ -76,6 +77,7 @@ class FilterPageAppTests(unittest.TestCase):
             "n_limit": 5000,
             "stop_on_first_parse_error": True,
         }
+        app.session_state["checker_show_browse"] = True
         app.run(timeout=20)
         self.assertEqual(list(app.exception), [])
 
@@ -91,39 +93,51 @@ class FilterPageAppTests(unittest.TestCase):
 
     def test_new_feed_on_checker_clears_stale_filter_state(self):
         """Switching feeds on the Checker wipes rule/browse state built against the
-        previous feed, so a stale category can't carry over or crash the Browse tab."""
-        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
-        app.session_state["loaded_feed"] = {
-            "path": self.path, "label": "fixture.xml", "size": len(FIXTURE),
-            "content_hash": "feedB", "scope": "Auto (full)",
-            "n_limit": 5000, "stop_on_first_parse_error": True,
-        }
-        # Stale rule/browse state left over from a different feed ("feedA").
-        app.session_state["ff_rules_feed"] = "feedA"
-        app.session_state["ff_rules"] = [99]
-        app.session_state["ff_group_ids"] = [0]
-        app.session_state["ff_cat_values_0"] = ["Ghost category not in feed B"]
-        app.session_state["ff_browse_categories"] = ["Ghost category not in feed B"]
-        app.run(timeout=20)
+        previous feed, so a stale category can't carry over or crash the Browse tab.
 
-        ss = app.session_state
-        self.assertEqual(list(app.exception), [])
-        # Feed changed → state re-synced to the new feed and the stale values dropped.
-        self.assertEqual(ss["ff_rules_feed"], "feedB")
-        stale = ["Ghost category not in feed B"]
-        if "ff_cat_values_0" in ss:
-            self.assertNotEqual(ss["ff_cat_values_0"], stale)
-        if "ff_browse_categories" in ss:
-            self.assertNotEqual(ss["ff_browse_categories"], stale)
-        if "ff_rules" in ss:
-            self.assertNotEqual(ss["ff_rules"], [99])
-        # Browse tab still rendered (did not crash on the stale multiselect value).
-        self.assertIn("🗑 Clear all", [b.label for b in app.button])
+        Runs with the Browse panel BOTH off and on: the sync lives on the load
+        path, so a hidden panel (the default) must invalidate feed A's state just
+        the same — otherwise it survives into the Feed Filter page's ff_table."""
+        for show_browse in (False, True):
+            with self.subTest(show_browse=show_browse):
+                app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
+                app.session_state["loaded_feed"] = {
+                    "path": self.path, "label": "fixture.xml", "size": len(FIXTURE),
+                    "content_hash": "feedB", "scope": "Auto (full)",
+                    "n_limit": 5000, "stop_on_first_parse_error": True,
+                }
+                app.session_state["checker_show_browse"] = show_browse
+                # Stale rule/browse state left over from a different feed ("feedA").
+                app.session_state["ff_rules_feed"] = "feedA"
+                app.session_state["ff_rules"] = [99]
+                app.session_state["ff_group_ids"] = [0]
+                app.session_state["ff_cat_values_0"] = ["Ghost category not in feed B"]
+                app.session_state["ff_browse_categories"] = ["Ghost category not in feed B"]
+                app.run(timeout=20)
+
+                ss = app.session_state
+                self.assertEqual(list(app.exception), [])
+                # Feed changed → state re-synced to the new feed, stale values dropped.
+                self.assertEqual(ss["ff_rules_feed"], "feedB")
+                stale = ["Ghost category not in feed B"]
+                if "ff_cat_values_0" in ss:
+                    self.assertNotEqual(ss["ff_cat_values_0"], stale)
+                if "ff_browse_categories" in ss:
+                    self.assertNotEqual(ss["ff_browse_categories"], stale)
+                if "ff_rules" in ss:
+                    self.assertNotEqual(ss["ff_rules"], [99])
+                buttons = [b.label for b in app.button]
+                if show_browse:
+                    # Browse half rendered and did not crash on the stale multiselect.
+                    self.assertIn("🗑 Clear all", buttons)
+                else:
+                    self.assertNotIn("🗑 Clear all", buttons)
 
     def test_failed_submit_keeps_both_panels_alive(self):
         """A bad submit (typo'd URL) must not blank the page: the error renders
         under the form and the already-loaded feed's validation + browse panels
-        stay on screen (no st.stop() on the load path)."""
+        stay on screen (no st.stop() on the load path). Browse is opt-in now, so
+        this turns it on to cover the two-panel case it was written for."""
         digest = hashlib.sha256(FIXTURE).hexdigest()
         app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
         app.session_state["loaded_feed"] = {
@@ -131,6 +145,7 @@ class FilterPageAppTests(unittest.TestCase):
             "content_hash": digest, "scope": "Auto (full)",
             "n_limit": 5000, "stop_on_first_parse_error": True,
         }
+        app.session_state["checker_show_browse"] = True
         app.run(timeout=20)
         app.text_input[0].set_value("ftp://bad.example/feed.xml")
         next(b for b in app.button if b.label == "Load feed").click()
@@ -170,20 +185,54 @@ class FilterPageAppTests(unittest.TestCase):
             "collapsed layout should constrain .block-container to 1200px",
         )
 
-    def test_browse_panel_toggle_defaults_to_on(self):
-        """The toggle exists, defaults to on, and the side-by-side layout keeps
-        using the full window width — collapsing is opt-in."""
+    def test_browse_panel_hidden_by_default(self):
+        """A first visit is check-only: the toggle is present but off, there is no
+        right half, and the page stays at the app's normal 1200px measure so the
+        validation output reads properly on a laptop. Browsing is opt-in."""
         app = AppTest.from_file(str(ROOT / "feed_checker_gui.py")).run(timeout=20)
         self.assertEqual(list(app.exception), [])
         toggle = next(t for t in app.toggle if t.label == "Browse & filter panel")
-        self.assertTrue(toggle.value)
-        self.assertIn("② Browse & filter", [s.value for s in app.subheader])
+        self.assertFalse(toggle.value)
+        self.assertNotIn("② Browse & filter", [s.value for s in app.subheader])
+        self.assertIn("Load & check", [s.value for s in app.subheader])
+        self.assertTrue(any("max-width:1200px" in str(m.value) for m in app.markdown))
+
+    def test_switching_browse_panel_on_splits_the_page(self):
+        """Clicking the toggle on is enough to get the second half back, full
+        window width, with the ①/② numbering restored — no reload, no re-load."""
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py")).run(timeout=20)
+        next(t for t in app.toggle if t.label == "Browse & filter panel").set_value(True)
+        app.run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        subheaders = [s.value for s in app.subheader]
+        self.assertIn("① Load & check", subheaders)
+        self.assertIn("② Browse & filter", subheaders)
         self.assertTrue(any("max-width:100%" in str(m.value) for m in app.markdown))
+
+    def test_browse_choice_survives_a_page_round_trip(self):
+        """An AM who switches the panel on, visits the Feed Filter page and comes
+        back must still find it on. Streamlit drops widget state for widgets the
+        current page didn't render, so the choice is mirrored into the non-widget
+        key checker_browse_pref — without it the panel silently closes itself."""
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py")).run(timeout=20)
+        next(t for t in app.toggle if t.label == "Browse & filter panel").set_value(True)
+        app.run(timeout=20)
+        self.assertIn("② Browse & filter", [s.value for s in app.subheader])
+
+        app.switch_page("filter_page.py").run(timeout=20)
+        app.switch_page("checker_page.py").run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        toggle = next(t for t in app.toggle if t.label == "Browse & filter panel")
+        self.assertTrue(toggle.value, "browse choice was forgotten on the way back")
+        self.assertIn("② Browse & filter", [s.value for s in app.subheader])
 
     def test_empty_submit_keeps_browse_placeholder(self):
         """Clicking Load feed with nothing filled shows a warning but keeps the
-        right-half Browse placeholder visible (the page never half-disappears)."""
-        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py")).run(timeout=20)
+        right-half Browse placeholder visible (the page never half-disappears).
+        Browse is opt-in now, so this turns it on first."""
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
+        app.session_state["checker_show_browse"] = True
+        app.run(timeout=20)
         next(b for b in app.button if b.label == "Load feed").click()
         app.run(timeout=20)
         self.assertEqual(list(app.exception), [])
