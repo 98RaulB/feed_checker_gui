@@ -298,6 +298,54 @@ class FilterPageAppTests(unittest.TestCase):
         self.assertEqual(app.session_state["ff_val_0"], "",
                          "a cleared value was refilled from the mirror")
 
+    def test_param_indexing_setting_survives_hiding_the_panel(self):
+        """'Also index product parameters' lives inside the Browse panel, so its
+        widget key is dropped when the panel is hidden. Without the
+        checker_index_params_pref mirror it silently reverts to unticked — losing
+        the AM's setting and changing the table signature, which forces a needless
+        re-parse of the whole feed on the next open."""
+        app = self._checker_with_one_rule()
+        box = next(c for c in app.checkbox if str(c.key or "") == "ff_index_params_cb")
+        box.set_value(True)
+        app.run(timeout=20)
+        self.assertTrue(app.session_state["ff_index_params_cb"])
+        signature_with_params = app.session_state["ff_table_signature"]
+
+        self._browse_toggle(app).set_value(False)
+        app.run(timeout=20)
+        self._browse_toggle(app).set_value(True)
+        app.run(timeout=20)
+
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(app.session_state["ff_index_params_cb"],
+                        "param-indexing setting was lost when the panel was hidden")
+        # Same signature ⇒ the reopen reused the parsed table instead of redoing it.
+        self.assertEqual(app.session_state["ff_table_signature"], signature_with_params)
+
+    def test_browse_table_is_not_parsed_while_the_panel_is_hidden(self):
+        """The point of hiding the panel is that a check-only run doesn't pay for
+        the browse parse. ff_table must therefore be absent until the first open —
+        and present (cached) from then on, including after another hide."""
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
+        app.session_state["loaded_feed"] = {
+            "path": self.path, "label": "fixture.xml", "size": len(FIXTURE),
+            "content_hash": hashlib.sha256(FIXTURE).hexdigest(),
+            "scope": "Auto (full)", "n_limit": 5000, "stop_on_first_parse_error": True,
+        }
+        app.run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertNotIn("ff_table", app.session_state,
+                         "hidden panel still parsed the feed for browsing")
+
+        self._browse_toggle(app).set_value(True)
+        app.run(timeout=20)
+        self.assertIn("ff_table", app.session_state)
+
+        # Hiding again keeps the parsed table, so reopening is free.
+        self._browse_toggle(app).set_value(False)
+        app.run(timeout=20)
+        self.assertIn("ff_table", app.session_state)
+
     def test_new_feed_does_not_inherit_mirrored_rule_values(self):
         """The mirror is dropped with the rest of ff_* on a feed change, so feed
         B never starts out carrying feed A's rule values."""

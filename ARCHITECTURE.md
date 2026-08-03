@@ -54,6 +54,16 @@ the common case) renders **above** the columns and drives three things:
 - whether the Browse block runs at all — hidden skips
   `_prepare_browse_table()`, so a check-only run never pays for the second parse.
 
+The feed is therefore parsed for browsing **lazily, on first open**, not at load:
+`ff_table` is absent while the panel is hidden. Measured on a 10 MB / 30k item
+feed, the first open costs ~1.2 s over a steady-state rerun (3.1 s vs 1.9 s); it
+is wrapped in a spinner because that grows with feed size. `ff_table` /
+`ff_table_signature` are plain keys, so hiding the panel again keeps the parsed
+table and every later reopen is free. `checker_index_params_pref` mirrors the
+"index product parameters" checkbox for the same reason the toggle needs
+`checker_browse_pref` — losing that widget key would both revert the AM's setting
+and change the signature, re-parsing the whole feed for nothing.
+
 Two consequences of the panel being off by default:
 
 - **The choice must be remembered explicitly.** Streamlit drops widget state for

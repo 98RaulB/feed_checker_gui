@@ -1439,14 +1439,24 @@ def _prepare_browse_table():
 
     Assumes _sync_filter_feed() already ran for this feed — it is called on the
     load path, not here, so a collapsed panel still invalidates stale state."""
+    # ff_index_params_cb is a widget key, so hiding the panel drops it and the box
+    # would silently revert to unticked — losing the AM's setting AND changing the
+    # signature, which forces a pointless re-parse. checker_index_params_pref is a
+    # plain key outside the ff_* namespace, so it survives both the widget cleanup
+    # and _sync_filter_feed()'s blanket wipe.
     index_params = st.checkbox(
         "Also index product parameters (enables the Product-parameter filter)",
         key="ff_index_params_cb",
+        value=bool(st.session_state.get("checker_index_params_pref", False)),
     )
+    st.session_state["checker_index_params_pref"] = index_params
     sig = f"{content_hash}::p{int(index_params)}"
     if st.session_state.get("ff_table_signature") != sig:
         try:
-            _tbl = ff.extract(src_path, index_params=index_params)
+            # Only reached on a first open or a changed feed/param setting. On a
+            # large feed this is seconds of work, so say so rather than looking hung.
+            with st.spinner("Preparing the feed for browsing…"):
+                _tbl = ff.extract(src_path, index_params=index_params)
         except Exception as _e:
             st.error(f"Could not parse feed for filtering: {_e}")
             return None
