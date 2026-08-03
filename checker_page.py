@@ -67,12 +67,9 @@ except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
 inject_css()
-# Use the full page width — the check + browse panels sit side by side.
-st.markdown(
-    "<style>.block-container{max-width:100% !important;"
-    "padding-left:2rem !important;padding-right:2rem !important;}</style>",
-    unsafe_allow_html=True,
-)
+# Page width is decided down with the layout, not here: side-by-side needs the
+# whole window, check-only reads better at the app's normal measure. A <style>
+# block styles the page wherever it lands, so it can wait for the toggle.
 page_header(
     "Feed Checker",
     subtitle="Check a product feed for FAVI and browse/filter it in one view — "
@@ -1466,10 +1463,39 @@ def _prepare_browse_table():
 # Both halves are visible from the start: the load form + validation on the left,
 # the browse/filter panel on the right (empty until a feed is loaded) — so it reads
 # immediately as "check a feed AND browse it".
-col_left, col_right = st.columns(2, gap="large")
+#
+# The panel is a toggle rather than an expander around the right half: st.columns
+# fixes its widths when it is created, so an expander would only collapse
+# vertically and leave validation stranded at half width. Reclaiming the space
+# means choosing the split up front — hence a control ABOVE the columns.
+show_browse = st.toggle(
+    "Browse & filter panel",
+    value=True,
+    key="checker_show_browse",
+    help="Turn off to give validation the whole page width — the metric row and "
+         "issue tables stop wrapping on a laptop screen. The loaded feed stays "
+         "loaded, so switching it back on costs nothing.",
+)
+
+# Side by side needs every pixel. Check-only would sprawl at 100% on a big
+# monitor, so it falls back to the same measure as the rest of the app
+# (branding.py's 1200px, which this rule overrides while side by side).
+st.markdown(
+    "<style>.block-container{"
+    f"max-width:{'100%' if show_browse else '1200px'} !important;"
+    "padding-left:2rem !important;padding-right:2rem !important;}</style>",
+    unsafe_allow_html=True,
+)
+
+if show_browse:
+    col_left, col_right = st.columns(2, gap="large")
+else:
+    # One flowing column, full measure. No right half to cross-reference, so the
+    # ①/② numbering is dropped too.
+    col_left, col_right = st.container(), None
 
 with col_left:
-    st.subheader("① Load & check")
+    st.subheader("① Load & check" if show_browse else "Load & check")
     with st.form("input"):
         url = st.text_input("Feed URL", placeholder="https://example.com/feed.xml")
         up = st.file_uploader("…or upload an XML file (.xml or .xml.gz)", type=["xml", "gz"])
@@ -1527,21 +1553,24 @@ if _feed:
 
 # Browse panel (right) — rendered before validation so a fatal parse error in
 # validation (which still st.stop()s) can't blank it. Empty until a feed loads.
-with col_right:
-    st.subheader("② Browse & filter")
-    if not _feed:
-        st.caption("Build AND/OR rules and see how many products remain — live.")
-        st.info("⬅︎ Load a feed on the left to browse and filter it here.")
-    else:
-        _browse_table = _prepare_browse_table()
-        if _browse_table is None:
-            pass
-        elif _browse_table.spec == "UNKNOWN":
-            st.warning("Format not recognized — nothing to filter. See Validation on the left.")
-        elif _browse_table.n == 0:
-            st.info("No items were found to filter.")
+# Skipped entirely when collapsed, so a check-only run never pays for the second
+# parse in _prepare_browse_table().
+if show_browse:
+    with col_right:
+        st.subheader("② Browse & filter")
+        if not _feed:
+            st.caption("Build AND/OR rules and see how many products remain — live.")
+            st.info("⬅︎ Load a feed on the left to browse and filter it here.")
         else:
-            render_filter()
+            _browse_table = _prepare_browse_table()
+            if _browse_table is None:
+                pass
+            elif _browse_table.spec == "UNKNOWN":
+                st.warning("Format not recognized — nothing to filter. See Validation on the left.")
+            elif _browse_table.n == 0:
+                st.info("No items were found to filter.")
+            else:
+                render_filter()
 
 # Validation (left, below the load form).
 with col_left:
@@ -1550,7 +1579,8 @@ with col_left:
     if not _feed:
         st.caption(
             "Paste a feed URL or upload a file, then **Load feed** — it's validated here "
-            "and becomes browsable on the right."
+            + ("and becomes browsable on the right." if show_browse
+               else "(and becomes browsable once you switch the panel back on).")
         )
     else:
         st.write(f"**Source:** `{src_label}`")

@@ -142,6 +142,44 @@ class FilterPageAppTests(unittest.TestCase):
         self.assertIn("**Source:**", markdown)  # validation survived the bad submit
         self.assertIn("🗑 Clear all", [b.label for b in app.button])  # browse survived
 
+    def test_collapsing_browse_panel_leaves_validation_full_width(self):
+        """Switching the Browse panel off drops the right half entirely — no ②
+        subheader, no filter UI — while validation renders to completion at the
+        full page measure and the loaded feed stays loaded."""
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
+        app.session_state["loaded_feed"] = {
+            "path": self.path, "label": "fixture.xml", "size": len(FIXTURE),
+            "content_hash": hashlib.sha256(FIXTURE).hexdigest(),
+            "scope": "Auto (full)", "n_limit": 5000, "stop_on_first_parse_error": True,
+        }
+        app.session_state["checker_show_browse"] = False
+        app.run(timeout=20)
+
+        self.assertEqual(list(app.exception), [])
+        subheaders = [s.value for s in app.subheader]
+        # Right half gone, and the left half loses its now-pointless ① marker.
+        self.assertNotIn("② Browse & filter", subheaders)
+        self.assertIn("Load & check", subheaders)
+        self.assertNotIn("🗑 Clear all", [b.label for b in app.button])
+        # Validation still ran end to end off the same loaded feed.
+        self.assertIn("**Source:**", " ".join(str(m.value) for m in app.markdown))
+        self.assertIn("Scope:", " ".join(str(c.value) for c in app.caption))
+        # Collapsed reverts to the app's normal measure instead of sprawling.
+        self.assertTrue(
+            any("max-width:1200px" in str(m.value) for m in app.markdown),
+            "collapsed layout should constrain .block-container to 1200px",
+        )
+
+    def test_browse_panel_toggle_defaults_to_on(self):
+        """The toggle exists, defaults to on, and the side-by-side layout keeps
+        using the full window width — collapsing is opt-in."""
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py")).run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        toggle = next(t for t in app.toggle if t.label == "Browse & filter panel")
+        self.assertTrue(toggle.value)
+        self.assertIn("② Browse & filter", [s.value for s in app.subheader])
+        self.assertTrue(any("max-width:100%" in str(m.value) for m in app.markdown))
+
     def test_empty_submit_keeps_browse_placeholder(self):
         """Clicking Load feed with nothing filled shows a warning but keeps the
         right-half Browse placeholder visible (the page never half-disappears)."""
