@@ -1416,7 +1416,10 @@ def _sync_filter_feed(feed_hash: str) -> None:
     category multiselects and browse settings built against the previous feed
     cannot carry over (a stale category absent from the new feed's options would
     otherwise crash the Browse multiselect). Mirrors filter_page._set_feed's
-    cleanup for the Checker's own load path. Keeps only the param-index checkbox."""
+    cleanup for the Checker's own load path. Keeps only the param-index checkbox.
+
+    The blanket ff_* wipe also drops filter_view's sticky-rule-state mirror, which
+    is required: restoring the previous feed's rule values here would be wrong."""
     if st.session_state.get("ff_rules_feed") == feed_hash:
         return
     for _k in [

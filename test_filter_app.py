@@ -226,6 +226,108 @@ class FilterPageAppTests(unittest.TestCase):
         self.assertTrue(toggle.value, "browse choice was forgotten on the way back")
         self.assertIn("② Browse & filter", [s.value for s in app.subheader])
 
+    def _checker_with_one_rule(self):
+        """Checker page, feed loaded, Browse panel open, one rule row added."""
+        app = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
+        app.session_state["loaded_feed"] = {
+            "path": self.path, "label": "fixture.xml", "size": len(FIXTURE),
+            "content_hash": hashlib.sha256(FIXTURE).hexdigest(),
+            "scope": "Auto (full)", "n_limit": 5000, "stop_on_first_parse_error": True,
+        }
+        app.session_state["checker_show_browse"] = True
+        app.run(timeout=20)
+        next(b for b in app.button if str(b.label).startswith("➕ Add")).click()
+        app.run(timeout=20)
+        return app
+
+    @staticmethod
+    def _rule_value_box(app):
+        return next(w for w in app.text_input if str(w.key or "") == "ff_val_0")
+
+    @staticmethod
+    def _browse_toggle(app):
+        return next(t for t in app.toggle if t.label == "Browse & filter panel")
+
+    def test_rule_values_survive_closing_the_browse_panel(self):
+        """Rule rows are built from pure widget keys, which Streamlit discards when
+        the panel isn't rendered — the rows used to come back EMPTY while ff_rules
+        still listed them. filter_view mirrors them into ff_sticky_rule_state."""
+        app = self._checker_with_one_rule()
+        self._rule_value_box(app).set_value("Sofa")
+        app.run(timeout=20)
+        self.assertEqual(app.session_state["ff_val_0"], "Sofa")
+
+        self._browse_toggle(app).set_value(False)
+        app.run(timeout=20)
+        self._browse_toggle(app).set_value(True)
+        app.run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertEqual(app.session_state["ff_val_0"], "Sofa",
+                         "the AM's typed rule value was lost on reopen")
+
+    def test_mirror_never_overrides_a_live_rule_edit(self):
+        """The mirror must only refill MISSING keys. If it overwrote present ones
+        it would revert every edit made after a reopen, and clearing a value back
+        to empty would be impossible."""
+        app = self._checker_with_one_rule()
+        self._rule_value_box(app).set_value("Sofa")
+        app.run(timeout=20)
+        self._browse_toggle(app).set_value(False)
+        app.run(timeout=20)
+        self._browse_toggle(app).set_value(True)
+        app.run(timeout=20)
+
+        # Edit after a restore: the mirror still holds "Sofa".
+        self._rule_value_box(app).set_value("Bed")
+        app.run(timeout=20)
+        self.assertEqual(app.session_state["ff_val_0"], "Bed")
+        self._browse_toggle(app).set_value(False)
+        app.run(timeout=20)
+        self._browse_toggle(app).set_value(True)
+        app.run(timeout=20)
+        self.assertEqual(app.session_state["ff_val_0"], "Bed",
+                         "reopen resurrected the stale mirrored value")
+
+        # Clearing a value must stick too.
+        self._rule_value_box(app).set_value("")
+        app.run(timeout=20)
+        self._browse_toggle(app).set_value(False)
+        app.run(timeout=20)
+        self._browse_toggle(app).set_value(True)
+        app.run(timeout=20)
+        self.assertEqual(app.session_state["ff_val_0"], "",
+                         "a cleared value was refilled from the mirror")
+
+    def test_new_feed_does_not_inherit_mirrored_rule_values(self):
+        """The mirror is dropped with the rest of ff_* on a feed change, so feed
+        B never starts out carrying feed A's rule values."""
+        app = self._checker_with_one_rule()
+        self._rule_value_box(app).set_value("Sofa")
+        app.run(timeout=20)
+
+        other = tempfile.mkstemp(suffix=".xml")
+        os.close(other[0])
+        try:
+            payload = FIXTURE.replace(b"Sofa", b"Bed")
+            with open(other[1], "wb") as fh:
+                fh.write(payload)
+            app.session_state["loaded_feed"] = {
+                "path": other[1], "label": "other.xml", "size": len(payload),
+                "content_hash": hashlib.sha256(payload).hexdigest(),
+                "scope": "Auto (full)", "n_limit": 5000,
+                "stop_on_first_parse_error": True,
+            }
+            app.run(timeout=20)
+            ss = app.session_state          # no .get() on AppTest's session_state
+            self.assertEqual(list(app.exception), [])
+            if "ff_val_0" in ss:
+                self.assertNotEqual(ss["ff_val_0"], "Sofa")
+            mirrored = ss["ff_sticky_rule_state"] if "ff_sticky_rule_state" in ss else {}
+            self.assertNotEqual((mirrored or {}).get("ff_val_0"), "Sofa")
+        finally:
+            if os.path.exists(other[1]):
+                os.unlink(other[1])
+
     def test_empty_submit_keeps_browse_placeholder(self):
         """Clicking Load feed with nothing filled shows a warning but keeps the
         right-half Browse placeholder visible (the page never half-disappears).

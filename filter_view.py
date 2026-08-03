@@ -16,6 +16,76 @@ from branding import render_metric_row
 import feed_filter as ff
 
 
+# ── Sticky rule state ───────────────────────────────────────────────────────
+# The rule rows are built from pure widget keys (ff_field_N / ff_op_N_* /
+# ff_cat_values_N / ff_val_N / ff_pname_N), and Streamlit discards widget state
+# for widgets a run didn't render. Whenever this block is unmounted — the Feed
+# Checker's Browse panel is off by default, and a page switch unmounts it too —
+# those keys vanish while ff_rules still lists the rules, so the rows come back
+# EMPTY: the AM's typed values are silently gone.
+#
+# Fix: mirror them into one plain (non-widget) key, which survives, and refill
+# only keys that are MISSING. Never overwrite a key that is present, or the
+# mirror would fight the AM's own edits on every rerun.
+_STICKY_KEY = "ff_sticky_rule_state"
+_STICKY_GLOBALS = (
+    "ff_mode",
+    "ff_browse_query",
+    "ff_browse_categories",
+    "ff_browse_scope",
+    "ff_browse_page_size",
+)
+
+
+def _live_rule_ids() -> set:
+    """Rule ids currently attached to a group. Ids are never reused, so state
+    belonging to a deleted rule is simply not sticky any more."""
+    ids = set()
+    for group_id in st.session_state.get("ff_group_ids") or []:
+        for rule_id in st.session_state.get(f"ff_group_rules_{group_id}") or []:
+            ids.add(rule_id)
+    return ids
+
+
+def _is_sticky(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    if key in _STICKY_GLOBALS:
+        return True
+    return any(
+        key in (f"ff_field_{rid}", f"ff_cat_values_{rid}",
+                f"ff_val_{rid}", f"ff_pname_{rid}")
+        or key.startswith(f"ff_op_{rid}_")
+        for rid in _live_rule_ids()
+    )
+
+
+def _restore_sticky_state() -> None:
+    """Refill widget keys this run is missing. Call AFTER group state exists and
+    BEFORE any rule widget is instantiated."""
+    saved = st.session_state.get(_STICKY_KEY)
+    if not isinstance(saved, dict):
+        return
+    for key, value in saved.items():
+        if _is_sticky(key) and key not in st.session_state:
+            st.session_state[key] = value
+
+
+def _save_sticky_state() -> None:
+    """Snapshot the current rule values so the next unmount can't lose them."""
+    st.session_state[_STICKY_KEY] = {
+        key: st.session_state[key]
+        for key in list(st.session_state.keys())
+        if _is_sticky(key)
+    }
+
+
+def forget_sticky_state() -> None:
+    """Drop the mirror. Callers MUST use this whenever they clear rule state for
+    a new feed, otherwise the previous feed's values get restored on top."""
+    st.session_state.pop(_STICKY_KEY, None)
+
+
 def _display_source(label: str) -> str:
     value = str(label or "feed")
     parsed = urlparse(value)
@@ -281,6 +351,9 @@ def render_filter() -> None:
 
 
     _ensure_group_state()
+    # Group state is live now and no rule widget has rendered yet — the one window
+    # in which a refill is both possible and safe.
+    _restore_sticky_state()
     st.subheader("Filter rules")
 
     primary_group_id = st.session_state["ff_group_ids"][0]
@@ -985,5 +1058,8 @@ def render_filter() -> None:
         width="stretch",
         disabled=not exports_ready,
     )
+
+    # Every widget has rendered, so session_state holds this run's real values.
+    _save_sticky_state()
 
     st.markdown("© 2026 Raul Bertoldini")

@@ -271,6 +271,13 @@ def _set_feed(
     *,
     owned_path: bool,
 ) -> None:
+    # Imported here, not at module scope: filter_view is imported late (below the
+    # load gate) and _set_feed runs before that line.
+    from filter_view import forget_sticky_state
+
+    # Must precede the pops below — the mirror would otherwise restore the
+    # previous feed's rule values and browse settings straight back on.
+    forget_sticky_state()
     st.session_state.pop("ff_prepared_exports", None)
     st.session_state.pop("ff_category_facets", None)
     st.session_state.pop("ff_browse_request", None)

@@ -69,8 +69,27 @@ Two consequences of the panel being off by default:
   panel states.
 
 `loaded_feed` and `ff_rules` are plain session-state keys, so the loaded feed and
-the rule list survive a collapse; widget-keyed values inside `render_filter()`
-may be re-defaulted, and re-opening simply re-parses via the signature check.
+the rule list survive a collapse, and re-opening re-parses via the signature check.
+
+## Sticky rule state
+
+The rule rows are built from pure widget keys (`ff_field_N`, `ff_op_N_*`,
+`ff_cat_values_N`, `ff_val_N`, `ff_pname_N`), and Streamlit discards widget state
+for widgets a run didn't render. Closing the Browse panel (or switching page) used
+to drop them while `ff_rules` still listed the rules — so the rows came back
+**empty** and the AM's typed values were silently gone.
+
+`filter_view` mirrors those keys into `ff_sticky_rule_state`, one plain key that
+survives, and refills **only keys that are missing**. That last part is the whole
+safety property: overwriting present keys would revert every edit made after a
+reopen and make clearing a value back to empty impossible. Two consequences:
+
+- Rule ids are never reused, so `_is_sticky()` scoping the mirror to *live* rule
+  ids is what keeps a deleted rule from being resurrected.
+- Anything that clears rule state for a new feed **must** call
+  `forget_sticky_state()` first, or the previous feed's values come straight back.
+  `checker_page._sync_filter_feed()` gets this free from its blanket `ff_*` wipe;
+  `filter_page._set_feed()` calls it explicitly, before its own targeted pops.
 
 ## Feed loading & parsing
 
