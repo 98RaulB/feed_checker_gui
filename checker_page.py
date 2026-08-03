@@ -1470,7 +1470,7 @@ def _prepare_browse_table():
 # means choosing the split up front — hence a control ABOVE the columns.
 show_browse = st.toggle(
     "Browse & filter panel",
-    value=True,
+    value=False,
     key="checker_show_browse",
     help="Turn off to give validation the whole page width — the metric row and "
          "issue tables stop wrapping on a laptop screen. The loaded feed stays "
