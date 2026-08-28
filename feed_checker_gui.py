@@ -8,6 +8,13 @@
 # in the page scripts (a second call would raise).
 import streamlit as st
 
+import app_mode
+
+# Explicit, not just the default: the test suite boots this app and the
+# shop-facing shop_checker.py inside one interpreter, where module state
+# persists across AppTest runs.
+app_mode.SHOP = False
+
 from branding import FAVICON_URL
 
 st.set_page_config(page_title="FAVI Feed Tools", page_icon=FAVICON_URL, layout="wide")

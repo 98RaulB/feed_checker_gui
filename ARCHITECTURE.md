@@ -5,11 +5,26 @@ A Streamlit app that lets Account Managers **validate** a product feed and
 for Cloud Run. Deployed on **Streamlit Community Cloud (~1 GB RAM/app)** — memory
 discipline (columnar + capped) is deliberate, not incidental.
 
+## Two entry points, one codebase
+
+The repo deploys as **two apps**: `feed_checker_gui.py` (internal, both pages,
+ClickUp draft, Browse & filter) and `shop_checker.py` (shop-facing onboarding
+check: ONLY the Checker page, in shop mode). The entry point — not an env var —
+sets `app_mode.SHOP` before navigation runs, so a deployment can't "forget" the
+flag and expose internal features. Shop mode hides: the Feed Filter page, the
+Browse & filter panel, the ClickUp draft, Advanced options, internal-pipeline
+wording (the AWS-transformer message becomes shop-actionable copy), and the
+personal footer. Validation logic is IDENTICAL in both modes — one codebase so
+the shop tool can never drift from what AMs see.
+
 ## Module map
 
 | File | Role |
 |---|---|
-| `feed_checker_gui.py` | Entry point / `st.navigation` router. Calls `st.set_page_config` **once** (before navigation), then mounts the two pages. |
+| `feed_checker_gui.py` | Internal entry point / `st.navigation` router. Sets `app_mode.SHOP = False`, calls `st.set_page_config` **once** (before navigation), then mounts the two pages. |
+| `shop_checker.py` | Shop-facing entry point. Sets `app_mode.SHOP = True`, mounts only the Checker page. Deploy with tighter env caps (see the file header). |
+| `app_mode.py` | The `SHOP` flag both entry points assign explicitly (tests run both apps in one interpreter). |
+| `feed_download.py` | **Shared, hardened feed acquisition** (no streamlit): SSRF-pinned download with hard size + wall-clock caps (Content-Length pre-check AND per-chunk enforcement), upload persistence with the same size cap, per-uid 0o700 temp dir, TTL janitor + `fcntl` leases. Both pages use it, so their abuse limits cannot drift. Env knobs keep the historical `FAVI_FILTER_*` names. |
 | `checker_page.py` | **Unified page** (default). Opens check-only at 1200px: the load form with validation beneath it. Switching on the **Browse & filter panel** splits the page into two `st.columns` — **left** "① Load & check", **right** "② Browse & filter" (empty-state hint until a feed loads, then the shared filter UI) — at full window width, off ONE feed load. See "The Browse half is opt-in" below. Owns the validator: parse (DOM ≤30 MB / streaming), ~30 accumulators, `render_validation()`, and the ClickUp draft. A failed submit never `st.stop()`s — the error renders under the form so an already-loaded feed's panels stay on screen. |
 | `filter_page.py` | Thin standalone "Feed Filter" page: its own loader (SSRF-safe download, gate, parse → `ff_table`) then `filter_view.render_filter()`. Kept as a page so `switch_page("filter_page.py")` in the tests still resolves. |
 | `filter_view.py` | **Shared** rule builder → live counts → browse/preview → hand-off exports, wrapped in `@st.fragment render_filter()`. Reads `st.session_state["ff_table"]` + feed identity. Both the checker's Browse column and `filter_page.py` call it. |
@@ -103,10 +118,23 @@ reopen and make clearing a value back to empty impossible. Two consequences:
 
 ## Feed loading & parsing
 
-- One download per load. Uploads → temp file; URLs → temp file **over
-  `safe_http.public_session()`** (SSRF-safe: pinned public IP, redirect hops
-  re-validated). Temp files use `delete=False` (they must outlive the request;
-  `filter_page.py` also runs a flock-leased temp-file janitor).
+- One download per load, through the shared `feed_download.py`: SSRF-safe
+  (pinned public IP, redirect hops re-validated), size-capped (declared AND
+  actual bytes), wall-clock-capped (a slow-loris server can't hold a worker).
+  All temp files land in the managed per-uid dir; BOTH pages run the TTL
+  janitor on load, and each page flock-leases its current feed so the janitor
+  only reclaims abandoned ones (the Checker's lease lives in
+  `st.session_state["checker_owned_lease"]`; it never unlinks a replaced file
+  itself because the Feed Filter page may still reference it via
+  `shared_feed_path` — TTL collects it after the lease is released).
+- The Checker's own streaming parse is bounded like the filter engine's:
+  `ff.open_bounded_xml` caps total uncompressed bytes (`MAX_XML_BYTES`) and
+  per-item bytes (`MAX_ITEM_XML_BYTES`); `iter_items_stream` enforces the
+  per-item node cap (`MAX_ITEM_NODES`); `MAX_CHECK_ITEMS`
+  (`FAVI_CHECKER_MAX_ITEMS`, default 500k) bounds the *validated* item count —
+  the accumulators, not the byte caps, are what grow per item — while items
+  beyond it are still counted. The DOM path needs no byte cap: it only runs
+  for non-gz files ≤ 30 MB.
 - On a **feed change** (new content hash), the checker's `_sync_filter_feed()`
   wipes all `ff_*` rule/browse state so rules/category multiselects built against
   the previous feed can't carry over (a stale category would crash the Browse
@@ -136,6 +164,9 @@ reopen and make clearing a value back to empty impossible. Two consequences:
   boot `feed_checker_gui.py`, then either `switch_page("filter_page.py")` or inject
   `loaded_feed` to exercise the checker's two panels. Fragment reruns work under AppTest.
 - `test_feed_filter.py` (engine), `test_safe_http.py` (SSRF adapter), `test_feed_specs.py`.
+- `test_shop_mode.py` boots `shop_checker.py` via AppTest: internal surfaces
+  (ClickUp, Browse toggle, personal footer, AWS wording) must not render, and
+  the Checker's streaming path must honor the `feed_filter` caps in both modes.
 
 ## Known follow-ups
 

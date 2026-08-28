@@ -5,12 +5,12 @@ import re
 from collections import defaultdict
 import os
 import gzip
-import tempfile
 import json
 import base64
-import hashlib
 import streamlit as st
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
+
+import app_mode
 
 # Shared rules/helpers from your feed_specs.py
 from feed_specs import (
@@ -57,8 +57,8 @@ except Exception:
 # Shared FAVI look-and-feel (Work Sans, crimson banner, themed cards/pills).
 from branding import inject_css, page_header, render_metric_row
 import feed_filter as ff
+import feed_download as fdl
 from filter_view import render_filter
-from safe_http import public_session
 
 # Safe XML parsing (defusedxml if present)
 try:
@@ -67,20 +67,40 @@ except Exception:
     import xml.etree.ElementTree as ET  # type: ignore
 
 inject_css()
+# Reclaim abandoned downloads on every page run (leases protect live feeds) —
+# the Checker leaks a temp file per check otherwise, and the shared TEMP_DIR
+# is the only disk this page writes to.
+fdl.cleanup_stale_temp_files()
 # Page width is decided down with the layout, not here: side-by-side needs the
 # whole window, check-only reads better at the app's normal measure. A <style>
 # block styles the page wherever it lands, so it can wait for the toggle.
-page_header(
-    "Feed Checker",
-    subtitle="Check a product feed for FAVI — then switch on the Browse & filter "
-             "panel to explore the same feed and build rules beside the results.",
-)
-st.warning("🚧 **Beta** — more fixes and functionality coming soon.")
+if app_mode.SHOP:
+    page_header(
+        "Feed Check",
+        subtitle="Check your product feed for FAVI — paste the feed URL or "
+                 "upload the file to see what needs fixing before onboarding.",
+    )
+    st.caption(
+        "Beta tool — if a result looks wrong or you need help fixing your "
+        "feed, please contact your FAVI account manager."
+    )
+else:
+    page_header(
+        "Feed Checker",
+        subtitle="Check a product feed for FAVI — then switch on the Browse & filter "
+                 "panel to explore the same feed and build rules beside the results.",
+    )
+    st.warning("🚧 **Beta** — more fixes and functionality coming soon.")
 
 # --------- Tuning ----------
 SMALL_SIZE_LIMIT = 30 * 1024 * 1024   # 30 MB → DOM; above this → streaming
-REQUEST_TIMEOUT = 120                 # seconds
-STREAM_CHUNK = 1 << 20                # 1 MB
+# Hard cap on fully-validated items in Auto scope (streaming still COUNTS the
+# rest, bounded by feed_filter's byte caps). Each validated item appends to
+# ~10 accumulator lists, so this — not the byte cap — bounds validator memory.
+try:
+    MAX_CHECK_ITEMS = max(1, int(os.getenv("FAVI_CHECKER_MAX_ITEMS", "500000")))
+except ValueError:
+    MAX_CHECK_ITEMS = 500_000
 CLICKUP_FORM_URL = "https://forms.clickup.com/90151995362/f/2kyqmhz2-30675/FF5VMWEUZRGFU7QVFR"
 CLICKUP_COUNTRIES = ["CZ", "SK", "RO", "HU", "HR", "PL", "IT", "BG", "SI", "GR"]
 CLICKUP_FORMATS = ["CSV", "CENEO", "OTHER", "CENEJE", "GOOGLE", "LEGACY", "COMPARI", "SKROUTZ"]
@@ -374,62 +394,10 @@ def make_clickup_url(payload: Dict[str, Any]) -> str:
     return f"{CLICKUP_FORM_URL}#faviTicket={token}"
 
 # ---------- I/O helpers ----------
-_DOWNLOAD_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; FeedChecker/1.0; +https://favi.com)",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Accept-Encoding": "gzip, deflate",
-}
-
-# SSRF-safe session: resolves once, rejects private/reserved IPs, pins the
-# connection to that IP (defeats DNS-rebinding), verifies the TLS hostname, and
-# ignores env proxies — the same defense the Feed Filter page uses.
-_HTTP_SESSION = public_session()
-
-
-def download_to_tmp(url: str, chunk=STREAM_CHUNK) -> tuple[str, str]:
-    """Stream a URL to a temp file over the pinned public session, validating
-    every redirect hop against the SSRF policy. Returns (path, sha256)."""
-    current_url = url
-    for _hop in range(6):  # up to 5 redirects, each re-validated by the session
-        with _HTTP_SESSION.get(
-            current_url, stream=True, timeout=(15, REQUEST_TIMEOUT),
-            headers=_DOWNLOAD_HEADERS, allow_redirects=False,
-        ) as r:
-            if r.status_code in (301, 302, 303, 307, 308):
-                loc = r.headers.get("Location")
-                if not loc:
-                    raise ValueError("The feed URL redirected without a destination.")
-                current_url = urljoin(current_url, loc)
-                continue
-            r.raise_for_status()
-            ctype = r.headers.get("Content-Type", "").lower()
-            size_hdr = int(r.headers.get("Content-Length") or 0)
-            suffix = ".xml.gz" if ("gzip" in ctype or current_url.lower().split("?", 1)[0].endswith(".gz")) else ".xml"
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-            written = 0
-            digest = hashlib.sha256()
-            for chunk_bytes in r.iter_content(chunk_size=chunk):
-                if chunk_bytes:
-                    tmp.write(chunk_bytes)
-                    digest.update(chunk_bytes)
-                    written += len(chunk_bytes)
-            tmp.flush(); tmp.close()
-
-            effective_size = written or size_hdr
-            if effective_size and effective_size > SMALL_SIZE_LIMIT:
-                st.warning(f"Large feed detected: ~{effective_size/1024/1024:.0f} MB. Using streaming parser.")
-            return tmp.name, digest.hexdigest()
-    raise ValueError("The feed URL exceeded 5 redirects.")
-
-def persist_upload(up) -> tuple[str, str]:
-    """Save an uploaded file to disk. Returns (path, sha256)."""
-    data = up.read(); up.seek(0)
-    is_gz = data[:2] == b"\x1f\x8b"
-    suffix = ".xml.gz" if is_gz or (up.name and up.name.lower().endswith(".gz")) else ".xml"
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(data); tmp.flush(); tmp.close()
-    return tmp.name, hashlib.sha256(data).hexdigest()
+# Download/upload persistence moved to feed_download.py (shared with the Feed
+# Filter page): SSRF-pinned session, hard size + wall-clock caps, managed temp
+# dir with TTL janitor + flock leases. The Checker holds a lease on its current
+# feed in st.session_state["checker_owned_lease"].
 
 def is_gzip_path(path: str) -> bool:
     try:
@@ -442,7 +410,7 @@ def open_maybe_gzip(path: str):
     return gzip.open(path, "rb") if is_gzip_path(path) else open(path, "rb")
 
 # ---------- Streaming parser ----------
-def iter_items_stream(file_like, wanted_localnames: Iterable[str]):
+def iter_items_stream(file_like, wanted_localnames: Iterable[str], bounded=None):
     """
     Stream items with ET.iterparse. Yields (elem, root) for each end-event of a
     tag whose localname is in wanted_localnames (the generator clears each
@@ -452,6 +420,12 @@ def iter_items_stream(file_like, wanted_localnames: Iterable[str]):
     immediately — its wanted descendants (if any) have already ended and been
     yielded. Without this, a feed whose item tag never matches would silently
     build the FULL document tree in RAM.
+
+    `bounded` is the feed_filter._BoundedReader wrapping file_like (when given):
+    marking item start/end arms its per-item byte cap, and the per-item node
+    cap (ff.MAX_ITEM_NODES) is enforced here — the same protections as the
+    filter engine, because a crafted single item is held in RAM until its end
+    event no matter how the surrounding document is cleared.
     """
     want = set(wanted_localnames)
     context = ET.iterparse(file_like, events=("start", "end"))
@@ -461,12 +435,24 @@ def iter_items_stream(file_like, wanted_localnames: Iterable[str]):
     seen_counts: Dict[str, int] = {}
     yielded = 0
     open_wanted = 0  # how many wanted elements are currently open
+    item_nodes = 0   # elements inside the currently open item
 
     for event, elem in context:
         ln = localname(elem.tag) if isinstance(elem.tag, str) else ""
         if event == "start":
             if ln in want:
+                if open_wanted == 0:
+                    item_nodes = 0
+                    if bounded is not None:
+                        bounded.start_item()
                 open_wanted += 1
+            if open_wanted:
+                item_nodes += 1
+                if item_nodes > ff.MAX_ITEM_NODES:
+                    raise ff.FeedParseLimitError(
+                        "A single product in this feed has more than the "
+                        f"{ff.MAX_ITEM_NODES:,}-element limit."
+                    )
             continue
         # end event
         if yielded < 1_000:  # sample early for speed
@@ -476,14 +462,22 @@ def iter_items_stream(file_like, wanted_localnames: Iterable[str]):
             yield elem, root
             elem.clear()
             open_wanted -= 1
+            if open_wanted == 0 and bounded is not None:
+                bounded.end_item()
         elif open_wanted == 0:
             # Not inside an item → safe to drop this element's content now.
             elem.clear()
 
-    # If nothing matched, emit a hint in the UI
+    # If nothing matched, emit a hint in the UI (tag-dump is internal debug)
     if yielded == 0 and seen_counts:
-        top = sorted(seen_counts.items(), key=lambda x: -x[1])[:10]
-        st.info("No items matched. Top end-tags seen: " + ", ".join(f"{k}×{v}" for k,v in top))
+        if app_mode.SHOP:
+            st.info(
+                "No products were found in this feed — FAVI could not locate "
+                "any product entries in the XML structure."
+            )
+        else:
+            top = sorted(seen_counts.items(), key=lambda x: -x[1])[:10]
+            st.info("No items matched. Top end-tags seen: " + ", ".join(f"{k}×{v}" for k,v in top))
 
 # ---------- FAVI price-format validation ----------
 # Delegates to feed_specs.analyze_price_text: the format verdict and the
@@ -806,10 +800,12 @@ def run_dom_path() -> bool:
             st.stop()
         return False
     except MemoryError:
-        st.warning("Memory pressure detected with DOM path; falling back to streaming.")
+        if not app_mode.SHOP:  # internal diagnostics; the fallback is silent for shops
+            st.warning("Memory pressure detected with DOM path; falling back to streaming.")
         return False
     except Exception as e:
-        st.warning(f"DOM path failed ({e}). Falling back to streaming.")
+        if not app_mode.SHOP:
+            st.warning(f"DOM path failed ({e}). Falling back to streaming.")
         return False
 
 # ---------- Streaming path (Auto-large, any .gz, or Sample mode) ----------
@@ -880,14 +876,24 @@ def run_stream_path(limit: int | None):
             for _s in SPEC:
                 item_tags |= localnames_from_item_paths(_s)
 
-        st.caption("Looking for item tags: " + ", ".join(sorted(list(item_tags))))
+        if not app_mode.SHOP:
+            st.caption("Looking for item tags: " + ", ".join(sorted(list(item_tags))))
 
         unknown_spec = not spec_name or spec_name.upper() == "UNKNOWN"
 
-        # Full streaming pass
+        # MAX_CHECK_ITEMS bounds the accumulators even in Auto scope; items
+        # beyond the cap are still counted (bounded by the byte caps below).
+        cap = min(limit, MAX_CHECK_ITEMS) if limit is not None else MAX_CHECK_ITEMS
+
+        # Full streaming pass over a BOUNDED reader: total uncompressed bytes
+        # (ff.MAX_XML_BYTES) and per-item bytes (ff.MAX_ITEM_XML_BYTES) are
+        # capped, so a crafted .gz can neither decompress without limit nor
+        # smuggle one enormous item — same net as the filter engine.
         processed = 0
-        with open_maybe_gzip(src_path) as fh2:
-            for elem, root in iter_items_stream(fh2, wanted_localnames=item_tags):
+        with ff.open_bounded_xml(src_path) as fh2:
+            for elem, root in iter_items_stream(
+                fh2, wanted_localnames=item_tags, bounded=fh2,
+            ):
                 total_items += 1
 
                 if unknown_spec:
@@ -897,7 +903,7 @@ def run_stream_path(limit: int | None):
                     # operator what to fix first. (Same behavior as DOM path.)
                     continue
 
-                if limit is not None and processed >= limit:
+                if processed >= cap:
                     # keep counting total_items beyond limit without extraction
                     continue
 
@@ -906,6 +912,12 @@ def run_stream_path(limit: int | None):
         processed_items = processed
         # Only now has the whole document actually been parsed.
         st.success("XML syntax: OK")
+        if limit is None and total_items > processed_items > 0:
+            st.warning(
+                f"This feed has {total_items:,} items — the checker validated "
+                f"the first {processed_items:,} (its per-run limit) and only "
+                "counted the rest. Results below describe the validated items."
+            )
         if unknown_spec and total_items:
             st.info(
                 f"Format not recognized — {total_items} item-like elements were "
@@ -917,6 +929,9 @@ def run_stream_path(limit: int | None):
         st.error(f"XML syntax: ERROR — {e}")
         if stop_on_first_parse_error:
             st.stop()
+    except ff.FeedParseLimitError as e:
+        st.error(f"This feed is beyond the checker's safety limits: {e}")
+        st.stop()
     except Exception as e:
         st.error(f"Streaming parser error: {e}")
         st.stop()
@@ -1049,6 +1064,11 @@ def render_validation():
     # Check FAVI compatibility
     favi_compat = is_favi_compatible(spec_name)
     conv_required, conv_note = needs_conversion(spec_name)
+    if app_mode.SHOP and conv_required:
+        # feed_specs conversion notes are written for AMs and can name internal
+        # tooling ("Use Lambda transformer to convert."). Sanitize ONCE here —
+        # this note renders both in the summary line below and in the error box.
+        conv_note = "This feed format needs to be converted before FAVI can read it."
     pass_fail["FAVI direct compatibility"] = (favi_compat, not favi_compat and not conv_required, 
                                               conv_note if conv_required else "")
 
@@ -1056,13 +1076,26 @@ def render_validation():
 
     # Show FAVI compatibility warning if needed
     if conv_required:
-        st.error(f"""
-    **FAVI cannot parse this feed directly**
-    
+        if app_mode.SHOP:
+            # Shop wording: no internal pipeline names — a shop can't run
+            # FAVI's transformer; their actions are "re-export" or "ask the AM".
+            st.error(f"""
+    **FAVI cannot import this feed format directly**
+
     **Detected format:** {spec_name}
-    
+
     **Reason:** {conv_note}
-    
+
+    **What to do:** If your e-commerce platform can export a Google Shopping XML feed, use that instead — it is the format FAVI reads best. Otherwise contact your FAVI account manager: FAVI can usually convert the feed during onboarding.
+    """)
+        else:
+            st.error(f"""
+    **FAVI cannot parse this feed directly**
+
+    **Detected format:** {spec_name}
+
+    **Reason:** {conv_note}
+
     **Solution:** Use the AWS Lambda feed transformer to convert this feed to Google Shopping or element-based Ceneje format before importing to FAVI.
     """)
     elif not favi_compat:
@@ -1074,7 +1107,15 @@ def render_validation():
     Consider converting this feed to Google Shopping format for best compatibility.
     """)
 
-    # ---------- CLICKUP DRAFT ----------
+    # ---------- CLICKUP DRAFT (internal only) ----------
+    # The whole draft flow — problem codes, prefills, the expander with the
+    # link into FAVI's ClickUp intake form — is an AM workflow. In shop mode
+    # none of it is computed or rendered: a shop must never land in FAVI's
+    # internal ticket form.
+    if app_mode.SHOP:
+        summarize(pass_fail)
+        return _render_details(used_streaming)
+
     problem_codes = build_problem_codes(
         xml_ok=xml_ok,
         spec_name=spec_name,
@@ -1185,7 +1226,13 @@ def render_validation():
             width="stretch",
         )
 
+    _render_details(used_streaming)
+
+
+def _render_details(used_streaming: bool) -> None:
     # ---------- DETAILS ----------
+    # Per-issue tables + footer, shared by shop and internal modes (split out
+    # of render_validation so shop mode can skip the ClickUp block above).
     def safe_get(lst, i, default=""):
         try:
             return lst[i]
@@ -1404,11 +1451,12 @@ def render_validation():
             st.success("All recommended elements are present on every item checked.")
 
     st.markdown("---")
-    st.caption(
-        ("Scope: Sample first N items (streaming)" if use_sample_mode else
-         f"Scope: Auto (parser: {'Streaming' if used_streaming else 'DOM'})")
-    )
-    st.markdown("© 2026 Raul Bertoldini")
+    if not app_mode.SHOP:  # parser internals are diagnostics, not shop info
+        st.caption(
+            ("Scope: Sample first N items (streaming)" if use_sample_mode else
+             f"Scope: Auto (parser: {'Streaming' if used_streaming else 'DOM'})")
+        )
+    st.markdown("© 2026 FAVI" if app_mode.SHOP else "© 2026 Raul Bertoldini")
 
 
 def _sync_filter_feed(feed_hash: str) -> None:
@@ -1488,15 +1536,20 @@ def _prepare_browse_table():
 # toggle alone would forget an AM's choice every time they visit the Feed Filter
 # page and come back. checker_browse_pref is a plain (non-widget) key, which does
 # survive a page switch, so it carries the choice back in as the toggle's default.
-show_browse = st.toggle(
-    "Browse & filter panel",
-    value=bool(st.session_state.get("checker_browse_pref", False)),
-    key="checker_show_browse",
-    help="Switch on to browse the loaded feed and build AND/OR filter rules beside "
-         "the validation results. Off by default so validation gets the whole page "
-         "width — the metric row and issue tables don't wrap on a laptop screen.",
-)
-st.session_state["checker_browse_pref"] = show_browse
+if app_mode.SHOP:
+    # The Browse & filter panel is the AMs' rule-building power tool (its
+    # hand-off exports feed FAVI's internal pipeline) — never offered to shops.
+    show_browse = False
+else:
+    show_browse = st.toggle(
+        "Browse & filter panel",
+        value=bool(st.session_state.get("checker_browse_pref", False)),
+        key="checker_show_browse",
+        help="Switch on to browse the loaded feed and build AND/OR filter rules beside "
+             "the validation results. Off by default so validation gets the whole page "
+             "width — the metric row and issue tables don't wrap on a laptop screen.",
+    )
+    st.session_state["checker_browse_pref"] = show_browse
 
 # Side by side needs every pixel. Check-only would sprawl at 100% on a big
 # monitor, so it stays at the same measure as the rest of the app (branding.py's
@@ -1520,13 +1573,20 @@ with col_left:
     with st.form("input"):
         url = st.text_input("Feed URL", placeholder="https://example.com/feed.xml")
         up = st.file_uploader("…or upload an XML file (.xml or .xml.gz)", type=["xml", "gz"])
-        with st.expander("Advanced options"):
-            scope = st.selectbox("Processing scope", ["Auto (full)", "Sample first N items"])
-            n_limit = st.number_input(
-                "Sample size (items) — used only in sample mode",
-                min_value=100, max_value=200_000, value=5_000, step=500,
-            )
-            stop_on_first_parse_error = st.checkbox("Stop on first XML parse error", value=True)
+        if app_mode.SHOP:
+            # No parser knobs for shops — full check, keep going past XML
+            # errors so the report shows everything at once.
+            scope = "Auto (full)"
+            n_limit = 5_000
+            stop_on_first_parse_error = False
+        else:
+            with st.expander("Advanced options"):
+                scope = st.selectbox("Processing scope", ["Auto (full)", "Sample first N items"])
+                n_limit = st.number_input(
+                    "Sample size (items) — used only in sample mode",
+                    min_value=100, max_value=200_000, value=5_000, step=500,
+                )
+                stop_on_first_parse_error = st.checkbox("Stop on first XML parse error", value=True)
         submitted = st.form_submit_button("Load feed", type="primary", width="stretch")
 
 # Fetch once on submit and remember the feed so both panels work off one load and
@@ -1540,20 +1600,40 @@ if submitted:
         if url.strip():
             if not url.lower().startswith(("http://", "https://")):
                 raise ValueError("URL must start with http:// or https://")
-            _p, _hash = download_to_tmp(url.strip()); _lbl = url.strip()
+            _p, _sz, _hash = fdl.download_to_tmp(url.strip()); _lbl = url.strip()
         elif up is not None:
-            _p, _hash = persist_upload(up); _lbl = up.name
+            _p, _sz, _hash = fdl.persist_upload(up); _lbl = up.name
         else:
             _load_error = ("warning", "Provide a URL or upload a file.")
     except Exception as _e:
         _p = None
         _load_error = ("error", f"Could not load feed: {_e}")
     if _p:
-        _sz = os.path.getsize(_p) if os.path.exists(_p) else 0
+        # Lease the new file so the TTL janitor can't reclaim it while it is
+        # the session's current feed; release the previous feed's lease (the
+        # janitor collects that file after TTL — it is NOT unlinked here, the
+        # Feed Filter page may still reference it via shared_feed_path).
+        try:
+            _new_lease = fdl.lease_temp_path(_p)
+        except Exception:
+            _new_lease = None
+        _old_lease = st.session_state.pop("checker_owned_lease", None)
+        if _old_lease is not None:
+            try:
+                _old_lease.close()
+            except OSError:
+                pass
+        st.session_state["checker_owned_lease"] = _new_lease
         st.session_state["loaded_feed"] = {
             "path": _p, "label": _lbl, "size": _sz, "content_hash": _hash, "scope": scope,
             "n_limit": int(n_limit), "stop_on_first_parse_error": bool(stop_on_first_parse_error),
         }
+        if _sz > SMALL_SIZE_LIMIT:
+            st.info(
+                f"Large feed (~{_sz/1024/1024:.0f} MB) — the check may take a while."
+                if app_mode.SHOP else
+                f"Large feed detected: ~{_sz/1024/1024:.0f} MB. Using streaming parser."
+            )
 
 _feed = st.session_state.get("loaded_feed")
 if _feed:
@@ -1568,9 +1648,11 @@ if _feed:
     auto_force_streaming = is_gzip_path(src_path) or (file_size > SMALL_SIZE_LIMIT)
     use_sample_mode = (scope == "Sample first N items")
     # Cross-page hand-off: the standalone Feed Filter page can reuse this feed.
-    st.session_state["shared_feed_path"] = src_path
-    st.session_state["shared_feed_label"] = src_label
-    st.session_state["shared_feed_size"] = file_size
+    # (Internal only — the shop app doesn't mount the Feed Filter page.)
+    if not app_mode.SHOP:
+        st.session_state["shared_feed_path"] = src_path
+        st.session_state["shared_feed_label"] = src_label
+        st.session_state["shared_feed_size"] = file_size
     # Invalidate rule/browse state built against a DIFFERENT feed here, on the
     # load path — not inside the Browse panel. The panel is hidden by default, so
     # leaving this to _prepare_browse_table() would let feed A's ff_* state (and
@@ -1604,11 +1686,18 @@ with col_left:
     if _load_error:
         (st.warning if _load_error[0] == "warning" else st.error)(_load_error[1])
     if not _feed:
-        st.caption(
-            "Paste a feed URL or upload a file, then **Load feed** — it's validated here "
-            + ("and becomes browsable on the right." if show_browse
-               else "(switch on **Browse & filter panel** above to explore it too).")
-        )
+        if app_mode.SHOP:
+            # No Browse toggle exists in shop mode — never mention it.
+            st.caption(
+                "Paste your feed URL or upload the file, then **Load feed** — "
+                "the results appear below."
+            )
+        else:
+            st.caption(
+                "Paste a feed URL or upload a file, then **Load feed** — it's validated here "
+                + ("and becomes browsable on the right." if show_browse
+                   else "(switch on **Browse & filter panel** above to explore it too).")
+            )
     else:
         st.write(f"**Source:** `{src_label}`")
         render_validation()
