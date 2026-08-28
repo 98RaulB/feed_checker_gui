@@ -11,97 +11,24 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import fcntl
-import tempfile
-import time
-from urllib.parse import urljoin, urlparse
 
-import requests
 import streamlit as st
 
 from branding import inject_css, page_header, render_metric_row
 import feed_filter as ff
-from safe_http import public_session
 
-REQUEST_TIMEOUT = 120
-STREAM_CHUNK = 1 << 20
-MAX_REDIRECTS = 5
-
-
-def _positive_env_int(name: str, default: int) -> int:
-    try:
-        return max(1, int(os.getenv(name, str(default))))
-    except ValueError:
-        return default
-
-
-MAX_DOWNLOAD_SECONDS = _positive_env_int(
-    "FAVI_FILTER_MAX_DOWNLOAD_SECONDS", 300
+# Download/upload persistence, size+time caps, and the temp-file janitor live
+# in feed_download.py, shared with the Checker page so the two can never drift
+# apart on abuse limits. Aliased to the historical local names.
+from feed_download import (
+    STREAM_CHUNK,
+    cleanup_stale_temp_files as _cleanup_stale_temp_files,
+    display_source as _display_source,
+    download_to_tmp as _download_to_tmp,
+    lease_temp_path as _lease_temp_path,
+    persist_upload as _persist_upload,
 )
-MAX_DOWNLOAD_BYTES = (
-    _positive_env_int("FAVI_FILTER_MAX_DOWNLOAD_MB", 512) * 1024 * 1024
-)
-TEMP_FILE_TTL_SECONDS = _positive_env_int(
-    "FAVI_FILTER_TEMP_TTL_SECONDS", 6 * 60 * 60
-)
-TEMP_DIR = os.path.join(
-    tempfile.gettempdir(),
-    f"favi-feed-filter-{getattr(os, 'getuid', lambda: 0)()}",
-)
-_DOWNLOAD_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; FeedChecker/1.0; +https://favi.com)",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Accept-Encoding": "gzip, deflate",
-}
-_HTTP_SESSION = public_session()
-
-
-def _cleanup_stale_temp_files() -> None:
-    """Bound abandoned per-session downloads without touching other temp data."""
-    os.makedirs(TEMP_DIR, mode=0o700, exist_ok=True)
-    cutoff = time.time() - TEMP_FILE_TTL_SECONDS
-    try:
-        entries = list(os.scandir(TEMP_DIR))
-    except OSError:
-        return
-    for entry in entries:
-        try:
-            if (
-                entry.name.startswith("feed-")
-                and entry.is_file(follow_symlinks=False)
-                and entry.stat(follow_symlinks=False).st_mtime < cutoff
-            ):
-                with open(entry.path, "rb") as candidate:
-                    try:
-                        fcntl.flock(
-                            candidate.fileno(),
-                            fcntl.LOCK_EX | fcntl.LOCK_NB,
-                        )
-                    except BlockingIOError:
-                        continue
-                    os.unlink(entry.path)
-        except OSError:
-            pass
-
-
-def _new_temp_path(suffix: str) -> tuple[int, str]:
-    os.makedirs(TEMP_DIR, mode=0o700, exist_ok=True)
-    return tempfile.mkstemp(prefix="feed-", suffix=suffix, dir=TEMP_DIR)
-
-
-def _lease_temp_path(path: str):
-    """Keep an owned source locked so the TTL janitor cannot delete it."""
-    lease = open(path, "rb")
-    try:
-        fcntl.flock(lease.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
-    except Exception:
-        lease.close()
-        raise
-    return lease
-
 
 _cleanup_stale_temp_files()
 
@@ -121,125 +48,6 @@ st.warning(
 # --------------------------------------------------------------------------- #
 # Feed loading (download/upload -> temp file -> session-owned parse)
 # --------------------------------------------------------------------------- #
-def _download_to_tmp(url: str) -> tuple[str, int, str]:
-    current_url = url
-    started = time.monotonic()
-
-    for redirect_count in range(MAX_REDIRECTS + 1):
-        try:
-            response = _HTTP_SESSION.get(
-                current_url,
-                stream=True,
-                timeout=(15, REQUEST_TIMEOUT),
-                headers=_DOWNLOAD_HEADERS,
-                allow_redirects=False,
-            )
-        except requests.RequestException as exc:
-            raise ff.FeedDownloadError(
-                f"Could not connect to {_display_source(current_url)}."
-            ) from exc
-
-        with response:
-            if response.status_code in (301, 302, 303, 307, 308):
-                location = response.headers.get("Location")
-                if not location:
-                    raise ff.FeedDownloadError(
-                        "The feed URL redirected without a destination."
-                    )
-                if redirect_count == MAX_REDIRECTS:
-                    raise ff.FeedDownloadError(
-                        f"The feed URL exceeded {MAX_REDIRECTS} redirects."
-                    )
-                current_url = urljoin(current_url, location)
-                continue
-
-            if response.status_code >= 400:
-                raise ff.FeedDownloadError(
-                    f"The feed server at {_display_source(current_url)} "
-                    f"returned HTTP {response.status_code}."
-                )
-            declared = response.headers.get("Content-Length")
-            if declared:
-                try:
-                    declared_bytes = int(declared)
-                except ValueError:
-                    declared_bytes = 0
-                if declared_bytes > MAX_DOWNLOAD_BYTES:
-                    raise ff.FeedDownloadError(
-                        f"The feed is larger than the "
-                        f"{MAX_DOWNLOAD_BYTES // (1024 * 1024):,} MB download limit."
-                    )
-
-            suffix = (
-                ".xml.gz"
-                if current_url.lower().split("?", 1)[0].endswith(".gz")
-                else ".xml"
-            )
-            fd, path = _new_temp_path(suffix)
-            written = 0
-            digest = hashlib.sha256()
-            try:
-                with os.fdopen(fd, "wb") as out:
-                    for chunk in response.iter_content(STREAM_CHUNK):
-                        if not chunk:
-                            continue
-                        written += len(chunk)
-                        if written > MAX_DOWNLOAD_BYTES:
-                            raise ff.FeedDownloadError(
-                                f"The feed exceeded the "
-                                f"{MAX_DOWNLOAD_BYTES // (1024 * 1024):,} MB "
-                                "download limit."
-                            )
-                        if time.monotonic() - started > MAX_DOWNLOAD_SECONDS:
-                            raise ff.FeedDownloadError(
-                                f"The feed took longer than "
-                                f"{MAX_DOWNLOAD_SECONDS:,} seconds to download."
-                            )
-                        digest.update(chunk)
-                        out.write(chunk)
-            except requests.RequestException as exc:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-                raise ff.FeedDownloadError(
-                    f"The connection to {_display_source(current_url)} "
-                    "was interrupted while downloading."
-                ) from exc
-            except Exception:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
-                raise
-            return path, written, digest.hexdigest()
-
-    raise ff.FeedDownloadError("The feed could not be downloaded.")
-
-
-def _persist_upload(up) -> tuple[str, int, str]:
-    content = up.getbuffer()
-    size = len(content)
-    if size > MAX_DOWNLOAD_BYTES:
-        raise ff.FeedDownloadError(
-            f"The file is larger than the "
-            f"{MAX_DOWNLOAD_BYTES // (1024 * 1024):,} MB limit."
-        )
-    is_gzip = bytes(content[:2]) == b"\x1f\x8b"
-    suffix = ".xml.gz" if is_gzip else ".xml"
-    fd, path = _new_temp_path(suffix)
-    try:
-        with os.fdopen(fd, "wb") as out:
-            out.write(content)
-    except Exception:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-        raise
-    return path, size, hashlib.sha256(content).hexdigest()
-
-
 def _fingerprint_path(path: str) -> tuple[int, str]:
     size = 0
     digest = hashlib.sha256()
@@ -248,18 +56,6 @@ def _fingerprint_path(path: str) -> tuple[int, str]:
             size += len(chunk)
             digest.update(chunk)
     return size, digest.hexdigest()
-
-
-def _display_source(label: str) -> str:
-    value = str(label or "feed")
-    parsed = urlparse(value)
-    if parsed.scheme in ("http", "https") and parsed.hostname:
-        path = parsed.path or "/"
-        if len(path) > 64:
-            path = f"{path[:61]}…"
-        return f"{parsed.hostname}{path}"
-    name = os.path.basename(value)
-    return name if len(name) <= 80 else f"{name[:77]}…"
 
 
 def _set_feed(

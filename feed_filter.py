@@ -331,6 +331,11 @@ def _open_bounded_xml(path: str) -> _BoundedReader:
     return _BoundedReader(_open_maybe_gzip(path))
 
 
+# Public alias: the Checker page's own streaming parser wraps its input with
+# the same bomb/size protections as the filter engine.
+open_bounded_xml = _open_bounded_xml
+
+
 def _localnames_from_item_paths(spec_name: str) -> set:
     """Item tag localnames for a spec (mirrors the GUI helper)."""
     names = set()
