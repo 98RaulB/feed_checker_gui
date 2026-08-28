@@ -44,11 +44,14 @@ def _positive_env_int(name: str, default: int) -> int:
         return default
 
 
+# Defaults sized for the INTERNAL app (real partner feeds reach 1-2 GB, the
+# pipeline's own download cap is 2 GB). The shop entry point pins these DOWN
+# via os.environ.setdefault before this module loads — see shop_checker.py.
 MAX_DOWNLOAD_SECONDS = _positive_env_int(
-    "FAVI_FILTER_MAX_DOWNLOAD_SECONDS", 300
+    "FAVI_FILTER_MAX_DOWNLOAD_SECONDS", 900
 )
 MAX_DOWNLOAD_BYTES = (
-    _positive_env_int("FAVI_FILTER_MAX_DOWNLOAD_MB", 512) * 1024 * 1024
+    _positive_env_int("FAVI_FILTER_MAX_DOWNLOAD_MB", 2048) * 1024 * 1024
 )
 TEMP_FILE_TTL_SECONDS = _positive_env_int(
     "FAVI_FILTER_TEMP_TTL_SECONDS", 6 * 60 * 60

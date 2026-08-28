@@ -7,11 +7,18 @@
 # Shop mode is decided here, before st.navigation executes the page script —
 # see app_mode.py for why the entry point (not an env var) carries the flag.
 #
-# Recommended env for this deployment (tighter than the internal defaults):
-#   FAVI_FILTER_MAX_DOWNLOAD_MB=256   FAVI_FILTER_MAX_DOWNLOAD_SECONDS=180
-#   FAVI_FILTER_MAX_XML_MB=512        FAVI_CHECKER_MAX_ITEMS=300000
-#
 # Launch: streamlit run shop_checker.py
+import os
+
+# Tight abuse limits for anonymous traffic, pinned BEFORE feed_download /
+# feed_filter are imported (they read these at import time). setdefault, so an
+# operator-set env var / Streamlit secret still wins. The internal app keeps
+# the larger defaults defined in those modules (real partner feeds reach 2 GB).
+os.environ.setdefault("FAVI_FILTER_MAX_DOWNLOAD_MB", "256")
+os.environ.setdefault("FAVI_FILTER_MAX_DOWNLOAD_SECONDS", "180")
+os.environ.setdefault("FAVI_FILTER_MAX_XML_MB", "512")
+os.environ.setdefault("FAVI_CHECKER_MAX_ITEMS", "300000")
+
 import streamlit as st
 
 import app_mode

@@ -55,12 +55,14 @@ from feed_specs import (
 
 # Hard ceiling on rows held in memory for interactive filtering.
 DEFAULT_ITEM_CAP = 200_000
+# Internal default sized for real partner feeds (up to ~2 GB uncompressed);
+# the shop entry point pins this down via env before this module loads.
 try:
     MAX_XML_BYTES = max(
-        1, int(os.getenv("FAVI_FILTER_MAX_XML_MB", "512"))
+        1, int(os.getenv("FAVI_FILTER_MAX_XML_MB", "2048"))
     ) * 1024 * 1024
 except ValueError:
-    MAX_XML_BYTES = 512 * 1024 * 1024
+    MAX_XML_BYTES = 2048 * 1024 * 1024
 try:
     MAX_ITEM_XML_BYTES = max(
         1, int(os.getenv("FAVI_FILTER_MAX_ITEM_XML_MB", "16"))
