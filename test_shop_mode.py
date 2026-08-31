@@ -112,6 +112,51 @@ class ShopModeAppTests(unittest.TestCase):
             any(t.label == "Browse & filter panel" for t in app.toggle)
         )
 
+    def test_shop_unknown_format_is_a_single_clear_dead_end(self):
+        # An unrecognized format must show ONE message — no metric row full of
+        # zeros, no green "nothing checked" summary lines.
+        fixture = b"<catalog><thing><a>1</a></thing><thing><a>2</a></thing></catalog>"
+        fd, path = tempfile.mkstemp(suffix=".xml")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(fixture)
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        app = AppTest.from_file(str(ROOT / "shop_checker.py"))
+        app.session_state["loaded_feed"] = {
+            "path": path,
+            "label": "mystery.xml",
+            "size": len(fixture),
+            "scope": "Auto (full)",
+            "n_limit": 5000,
+            "stop_on_first_parse_error": False,
+        }
+        app.run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+
+        text = _all_text(app)
+        self.assertIn("was not identified as one FAVI accepts", text)
+        self.assertIn("account manager", text)
+        self.assertIn("© 2026 FAVI", text)
+        # The confusing surfaces must NOT render.
+        self.assertNotIn("Duplicates", text)          # metric row
+        self.assertNotIn("Passing checks", text)      # green summary
+        self.assertNotIn("No items were validated", text)
+        # Internal app keeps the full diagnostic view for the same feed.
+        internal = AppTest.from_file(str(ROOT / "feed_checker_gui.py"))
+        internal.session_state["loaded_feed"] = {
+            "path": path,
+            "label": "mystery.xml",
+            "size": len(fixture),
+            "scope": "Auto (full)",
+            "n_limit": 5000,
+            "stop_on_first_parse_error": False,
+        }
+        internal.run(timeout=20)
+        self.assertEqual(list(internal.exception), [])
+        internal_text = _all_text(internal)
+        self.assertIn("Duplicates", internal_text)
+        self.assertIn("Transformation", internal_text)
+
     def test_shop_conversion_message_never_names_internal_tooling(self):
         # Attribute-based Ceneje.si triggers conversion_required, whose
         # feed_specs note literally says "Use Lambda transformer to convert."

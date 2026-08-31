@@ -32,6 +32,7 @@ the shop tool can never drift from what AMs see.
 | `safe_http.py` | `public_session()` → requests session with a `PinnedPublicAdapter` (resolve once, reject private/reserved IPs, pin the connection to that IP, verify the original TLS hostname, ignore env proxies). SSRF defense for feed downloads. |
 | `feed_specs.py` | Feed-format detection + field readers (Heureka, Google, Ceneo, Compari, …). Shared by validator and engine so extracted values always agree with the checker. |
 | `branding.py` | FAVI look-and-feel: `inject_css`, `page_header`, `render_metric_row`. |
+| `error_reporting.py` | Best-effort Slack alerts on unexpected failures (streamlit-free). Enabled per deployment by the `SLACK_WEBHOOK_URL` secret; silent no-op without it; identical errors muted for 10 min per process. Wired into the Checker's load/parse/render error paths — user errors (bad URL, size caps) do NOT alert. |
 
 ## Why one page needs `st.fragment`
 

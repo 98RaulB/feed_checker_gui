@@ -11,6 +11,7 @@ import streamlit as st
 from urllib.parse import urlparse
 
 import app_mode
+import error_reporting as er
 
 # Shared rules/helpers from your feed_specs.py
 from feed_specs import (
@@ -918,7 +919,8 @@ def run_stream_path(limit: int | None):
                 f"the first {processed_items:,} (its per-run limit) and only "
                 "counted the rest. Results below describe the validated items."
             )
-        if unknown_spec and total_items:
+        if unknown_spec and total_items and not app_mode.SHOP:
+            # Shop mode renders its own dead-end message in render_validation.
             st.info(
                 f"Format not recognized — {total_items} item-like elements were "
                 "counted but field checks were skipped (there is no path table "
@@ -933,7 +935,17 @@ def run_stream_path(limit: int | None):
         st.error(f"This feed is beyond the checker's safety limits: {e}")
         st.stop()
     except Exception as e:
-        st.error(f"Streaming parser error: {e}")
+        notified = er.report_error(
+            "streaming validator crashed", e, source=src_label, shop=app_mode.SHOP,
+        )
+        if app_mode.SHOP:
+            st.error(
+                "Something went wrong while checking this feed."
+                + (" Our team has been notified." if notified else "")
+                + " Please try again, or contact your FAVI account manager."
+            )
+        else:
+            st.error(f"Streaming parser error: {e}")
         st.stop()
 
 
@@ -953,6 +965,35 @@ def render_validation():
             if not ok:
                 used_streaming = True
                 run_stream_path(limit=None)
+
+    # Shop mode: an unrecognized format is a DEAD END, not a report. The
+    # metric row (Format UNKNOWN, zeros), the mostly-green summary ("nothing
+    # checked" reads as "nothing wrong"), and the empty details only confuse a
+    # shop — show one clear message and stop.
+    if app_mode.SHOP and spec_name == "UNKNOWN":
+        st.markdown("---")
+        if not xml_ok:
+            st.error(
+                "**Your feed is not valid XML.** Fix the XML error shown "
+                "above first — the checks can only run on well-formed XML."
+            )
+        else:
+            counted = (
+                f"We found {total_items:,} product-like entries, but without "
+                "a recognized format none of the content checks can run."
+                if total_items
+                else "None of the content checks could run."
+            )
+            st.error(
+                "**This feed's format was not identified as one FAVI "
+                f"accepts, so the feed could not be checked.** {counted}\n\n"
+                "**What to do:** FAVI reads **Google Shopping XML** and "
+                "**Heureka XML** feeds best — most e-commerce platforms can "
+                "export one of these. Not sure? Send your feed URL to your "
+                "FAVI account manager and we will help you set it up."
+            )
+        st.markdown("© 2026 FAVI")
+        return
 
     # ---------- TOP ROW ----------
     st.markdown("---")
@@ -996,7 +1037,9 @@ def render_validation():
     # ---------- SUMMARY ----------
     pass_fail: Dict[str, Tuple[bool, bool, str]] = {}
     pass_fail["XML syntax"] = (xml_ok, False, "")
-    pass_fail["Transformation detected"] = (spec_name != "UNKNOWN", False, spec_name if spec_name != "UNKNOWN" else "")
+    # "Transformation" is FAVI-internal vocabulary; shops know "feed format".
+    pass_fail["Feed format recognized" if app_mode.SHOP else "Transformation detected"] = (
+        spec_name != "UNKNOWN", False, spec_name if spec_name != "UNKNOWN" else "")
     pass_fail["IDs present"] = (len(missing_id_idx) == 0, False, f"(missing: {len(missing_id_idx)})")
     pass_fail["ID format (letters/digits/-/_ only)"] = (
         True, len(bad_id_format_idx) > 0, f"(non-conforming: {len(bad_id_format_idx)})")
@@ -1608,6 +1651,14 @@ if submitted:
     except Exception as _e:
         _p = None
         _load_error = ("error", f"Could not load feed: {_e}")
+        # FeedDownloadError/ValueError are user errors (bad URL, too big,
+        # unsafe host) — only unexpected failures page the team.
+        if not isinstance(_e, ValueError):
+            er.report_error(
+                "feed load failed unexpectedly", _e,
+                source=url.strip() or getattr(up, "name", ""),
+                shop=app_mode.SHOP,
+            )
     if _p:
         # Lease the new file so the TTL janitor can't reclaim it while it is
         # the session's current feed; release the previous feed's lease (the
@@ -1700,4 +1751,22 @@ with col_left:
             )
     else:
         st.write(f"**Source:** `{src_label}`")
-        render_validation()
+        try:
+            render_validation()
+        except Exception as _e:
+            # st.stop()/st.rerun() signal the runner via exceptions that must
+            # pass through untouched (matched by name — they are not public API).
+            if type(_e).__name__ in ("StopException", "RerunException"):
+                raise
+            _notified = er.report_error(
+                "validation crashed", _e, source=src_label, shop=app_mode.SHOP,
+            )
+            if app_mode.SHOP:
+                # A raw traceback is neither actionable nor shop-safe.
+                st.error(
+                    "Something went wrong while checking this feed."
+                    + (" Our team has been notified." if _notified else "")
+                    + " Please try again, or contact your FAVI account manager."
+                )
+            else:
+                raise

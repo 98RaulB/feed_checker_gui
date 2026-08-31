@@ -7,6 +7,10 @@
 # Shop mode is decided here, before st.navigation executes the page script —
 # see app_mode.py for why the entry point (not an env var) carries the flag.
 #
+# Error alerts: set SLACK_WEBHOOK_URL in the deployment's Secrets to get a
+# Slack message on unexpected failures (see error_reporting.py). Optional —
+# without it the app runs fine, failures are just invisible to us.
+#
 # Launch: streamlit run shop_checker.py
 import os
 
