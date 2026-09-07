@@ -1018,8 +1018,8 @@ def apply_rule_groups(
 
 
 # --------------------------------------------------------------------------- #
-# Human- and machine-readable rule summaries (the "tell Raul exactly what to
-# do" output an AM hands back).
+# Human- and machine-readable rule summaries (the "tell the pipeline operator
+# exactly what to do" output an AM hands back).
 # --------------------------------------------------------------------------- #
 def rule_text(rule: Dict[str, Any]) -> str:
     op = rule.get("op", "?")

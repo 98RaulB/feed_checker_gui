@@ -23,6 +23,13 @@ Usage:
 
 Needs: AWS credentials with dynamodb:Scan on feed_configs (feed list only —
 feed CONTENT is fetched over the public CDN URLs, no cloud creds involved).
+
+Privacy contract (this repo is PUBLIC):
+  * Everything GitHub exposes — the job log, the step summary and the
+    `--public-state` artifact — identifies feeds by feedId prefix only and
+    never prints a shop name, feed URL or error text that could carry one.
+  * Shop names live only in `--state` and `--report`, which the workflow
+    ships to the private S3 prefix that the weekly digest reads.
 """
 from __future__ import annotations
 
@@ -211,6 +218,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--state", required=True)
     ap.add_argument("--report", required=True)
+    ap.add_argument("--public-state",
+                    help="redacted copy of --state (no shop names) safe to publish as a workflow artifact")
     ap.add_argument("--prev")
     ap.add_argument("--limit", type=int, default=0, help="audit only first N feeds (smoke)")
     ap.add_argument("--feed-id", help="audit a single feed (onboarding verification); includes paused")
@@ -243,12 +252,14 @@ def main() -> int:
     state_feeds: dict[str, dict] = {}
     for i, feed in enumerate(active, 1):
         fid, shop = feed["feedId"], feed["shopName"] or feed["feedId"][:8]
+        label = fid[:8]  # log lines are public: feedId prefix, never the shop
         try:
             path = fetch_to_tmp(feed["outputUrl"])
         except Exception as exc:  # noqa: BLE001
             state_feeds[fid] = {"shop": shop, "itemCount": 0, "warnings": {},
                                 "blockers": [f"fetch-error:{type(exc).__name__}"]}
-            print(f"[{i}/{len(active)}] {shop}: FETCH ERROR {exc}")
+            # Exception text from requests embeds the URL (= the shop's host).
+            print(f"[{i}/{len(active)}] {label}: FETCH ERROR {type(exc).__name__}")
             continue
         try:
             result = audit_feed(path)
@@ -266,7 +277,7 @@ def main() -> int:
         result["shop"] = shop
         state_feeds[fid] = result
         flag = " !! " + ",".join(result["blockers"]) if result["blockers"] else ""
-        print(f"[{i}/{len(active)}] {shop}: {result['itemCount']} items{flag}")
+        print(f"[{i}/{len(active)}] {label}: {result['itemCount']} items{flag}")
 
     # Delta: a blocker KIND is new for a feed if that kind wasn't present in
     # the previous state (kind = text before ':' so changing detail doesn't
@@ -274,15 +285,15 @@ def main() -> int:
     def kinds(blockers):
         return {b.split(":", 1)[0] for b in blockers}
 
-    new_blockers: list[str] = []
+    new_blockers: list[tuple[str, str, str]] = []  # (shop, feedId, blocker)
     if prev:
         for fid, cur in state_feeds.items():
             fresh = kinds(cur["blockers"]) - kinds(prev.get(fid, {}).get("blockers", []))
             for b in cur["blockers"]:
                 if b.split(":", 1)[0] in fresh:
-                    new_blockers.append(f"{cur['shop']} ({fid[:8]}): {b}")
+                    new_blockers.append((cur["shop"], fid, b))
 
-    ongoing = [f"{v['shop']}: {b}" for v in state_feeds.values() for b in v["blockers"]]
+    ongoing = [(v["shop"], b) for v in state_feeds.values() for b in v["blockers"]]
     totals: Counter = Counter()
     for v in state_feeds.values():
         totals.update(v["warnings"])
@@ -290,6 +301,11 @@ def main() -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with open(args.state, "w") as fh:
         json.dump({"generatedAt": now, "feeds": state_feeds}, fh, indent=1)
+    if args.public_state:
+        redacted = {fid: {k: v for k, v in row.items() if k != "shop"}
+                    for fid, row in state_feeds.items()}
+        with open(args.public_state, "w") as fh:
+            json.dump({"generatedAt": now, "feeds": redacted}, fh, indent=1)
 
     worst = sorted(state_feeds.values(),
                    key=lambda v: sum(v["warnings"].values()), reverse=True)[:15]
@@ -298,9 +314,9 @@ def main() -> int:
         f"{now} · {len(state_feeds)} feeds audited · {skipped_paused} paused skipped",
         "",
         f"## New blockers since last run: {len(new_blockers) or 'none'}",
-        *[f"- :rotating_light: {b}" for b in new_blockers], "",
+        *[f"- :rotating_light: {shop} ({fid[:8]}): {b}" for shop, fid, b in new_blockers], "",
         f"## All current blockers: {len(ongoing) or 'none'}",
-        *[f"- {b}" for b in ongoing], "",
+        *[f"- {shop}: {b}" for shop, b in ongoing], "",
         "## Fleet warning totals (advisory — warn-only by design)",
         *[f"- {k}: {totals[k]}" for k in WARN_KEYS if totals.get(k)], "",
         "## Feeds with most warnings",
@@ -315,10 +331,24 @@ def main() -> int:
     report = "\n".join(lines) + "\n"
     with open(args.report, "w") as fh:
         fh.write(report)
+    # The step summary is public on GitHub: fleet-level numbers only, feeds by
+    # id prefix, no shop names. Per-shop detail is in the private S3 report.
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
+        public_lines = [
+            "# Feed quality audit", "",
+            f"{now} · {len(state_feeds)} feeds audited · {skipped_paused} paused skipped",
+            "",
+            f"## New blockers since last run: {len(new_blockers) or 'none'}",
+            *[f"- :rotating_light: feed {fid[:8]}: {b}" for _, fid, b in new_blockers], "",
+            f"## All current blockers: {len(ongoing) or 'none'}", "",
+            "## Fleet warning totals (advisory — warn-only by design)",
+            *[f"- {k}: {totals[k]}" for k in WARN_KEYS if totals.get(k)], "",
+            "_Per-shop detail is in the private report published to S3; "
+            "this public repo's logs and summaries never name partners._",
+        ]
         with open(summary, "a") as fh:
-            fh.write(report)
+            fh.write("\n".join(public_lines) + "\n")
 
     print(f"\nreport -> {args.report}; state -> {args.state}")
     if new_blockers:

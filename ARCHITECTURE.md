@@ -13,8 +13,8 @@ check: ONLY the Checker page, in shop mode). The entry point — not an env var 
 sets `app_mode.SHOP` before navigation runs, so a deployment can't "forget" the
 flag and expose internal features. Shop mode hides: the Feed Filter page, the
 Browse & filter panel, the ClickUp draft, Advanced options, internal-pipeline
-wording (the AWS-transformer message becomes shop-actionable copy), and the
-personal footer. Validation logic is IDENTICAL in both modes — one codebase so
+wording (the AWS-transformer message becomes shop-actionable copy) and the
+parser-scope diagnostics. Validation logic is IDENTICAL in both modes — one codebase so
 the shop tool can never drift from what AMs see.
 
 ## Module map
@@ -166,8 +166,18 @@ reopen and make clearing a value back to empty impossible. Two consequences:
   `loaded_feed` to exercise the checker's two panels. Fragment reruns work under AppTest.
 - `test_feed_filter.py` (engine), `test_safe_http.py` (SSRF adapter), `test_feed_specs.py`.
 - `test_shop_mode.py` boots `shop_checker.py` via AppTest: internal surfaces
-  (ClickUp, Browse toggle, personal footer, AWS wording) must not render, and
+  (ClickUp, Browse toggle, Scope caption, AWS wording) must not render, and
   the Checker's streaming path must honor the `feed_filter` caps in both modes.
+
+## Nightly feed-quality audit
+
+`.github/workflows/feed-quality-audit.yml` runs `audit/audit_feeds.py` over every
+live published feed (advisory: it only fails on *new* feed-level blockers). It
+reads the feed list through a read-only OIDC role (`audit/iam/`, ARN in the
+`AUDIT_ROLE_ARN` repo secret). Because this repository is public, everything
+GitHub exposes — job log, step summary, the `audit-state` artifact — identifies
+feeds by id prefix only; the report and full state with shop names go to the
+private `_meta/audit/` S3 prefix that the pipeline's weekly digest reads.
 
 ## Keeping the shop app awake
 

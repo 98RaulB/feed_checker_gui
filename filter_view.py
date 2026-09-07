@@ -892,7 +892,7 @@ def render_filter() -> None:
 
 
     # --------------------------------------------------------------------------- #
-    # Hand-off: exactly what to tell Raul / run server-side
+    # Hand-off: exactly what to hand to the feed pipeline / run server-side
     # --------------------------------------------------------------------------- #
     handoff_ready = (
         result["active_rule_count"] > 0
@@ -1062,4 +1062,4 @@ def render_filter() -> None:
     # Every widget has rendered, so session_state holds this run's real values.
     _save_sticky_state()
 
-    st.markdown("© 2026 Raul Bertoldini")
+    st.markdown("© 2026 FAVI")

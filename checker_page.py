@@ -110,7 +110,10 @@ try:
     MAX_CHECK_ITEMS = max(1, int(os.getenv("FAVI_CHECKER_MAX_ITEMS", "500000")))
 except ValueError:
     MAX_CHECK_ITEMS = 500_000
-CLICKUP_FORM_URL = "https://forms.clickup.com/90151995362/f/2kyqmhz2-30675/FF5VMWEUZRGFU7QVFR"
+# ClickUp intake form for the internal-only ticket draft. Per-deployment via
+# the CLICKUP_FORM_URL env var / Streamlit secret (never hardcoded: this repo
+# is public). Unset = the draft still renders, without the "open form" link.
+CLICKUP_FORM_URL = os.getenv("CLICKUP_FORM_URL", "").strip()
 CLICKUP_COUNTRIES = ["CZ", "SK", "RO", "HU", "HR", "PL", "IT", "BG", "SI", "GR"]
 CLICKUP_FORMATS = ["CSV", "CENEO", "OTHER", "CENEJE", "GOOGLE", "LEGACY", "COMPARI", "SKROUTZ"]
 COUNTRY_BY_TLD = {
@@ -1271,11 +1274,17 @@ def render_validation():
             "problem_codes": problem_codes,
             "processed_items": processed_items,
         }
-        st.link_button(
-            "Open pre-filled ClickUp form ↗",
-            make_clickup_url(_clickup_payload),
-            width="stretch",
-        )
+        if CLICKUP_FORM_URL:
+            st.link_button(
+                "Open pre-filled ClickUp form ↗",
+                make_clickup_url(_clickup_payload),
+                width="stretch",
+            )
+        else:
+            st.caption(
+                "Form link disabled: set the CLICKUP_FORM_URL secret on this "
+                "deployment to enable the pre-filled ClickUp form."
+            )
 
     _render_details(used_streaming)
 
@@ -1507,7 +1516,7 @@ def _render_details(used_streaming: bool) -> None:
             ("Scope: Sample first N items (streaming)" if use_sample_mode else
              f"Scope: Auto (parser: {'Streaming' if used_streaming else 'DOM'})")
         )
-    st.markdown("© 2026 FAVI" if app_mode.SHOP else "© 2026 Raul Bertoldini")
+    st.markdown("© 2026 FAVI")
 
 
 def _sync_filter_feed(feed_hash: str) -> None:

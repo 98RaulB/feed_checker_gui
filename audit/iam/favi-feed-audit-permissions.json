@@ -9,7 +9,7 @@
         "dynamodb:DescribeTable"
       ],
       "Resource": [
-        "arn:aws:dynamodb:eu-north-1:620369152593:table/feed_configs"
+        "arn:aws:dynamodb:eu-north-1:<ACCOUNT_ID>:table/feed_configs"
       ]
     },
     {

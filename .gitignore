@@ -8,3 +8,6 @@ venv/
 state.json
 prev-state.json
 report.md
+
+# nightly audit: redacted artifact copy
+public-state.json

@@ -18,6 +18,8 @@
     }
   },
   "updateContentCommand": "[ -f packages.txt ] && sudo apt update && sudo apt upgrade -y && sudo xargs apt install -y <packages.txt; [ -f requirements.txt ] && pip3 install --user -r requirements.txt; pip3 install --user streamlit; echo '✅ Packages installed and Requirements met'",
+  // Dev-only: Codespaces proxies the preview through a different origin, so CORS/XSRF
+  // must be relaxed for the forwarded port. Production deployments keep Streamlit defaults.
   "postAttachCommand": {
     "server": "streamlit run feed_checker_gui.py --server.enableCORS false --server.enableXsrfProtection false"
   },

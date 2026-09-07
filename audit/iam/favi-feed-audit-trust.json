@@ -5,7 +5,7 @@
       "Sid": "AllowFeedCheckerRepoMainAudit",
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::620369152593:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {

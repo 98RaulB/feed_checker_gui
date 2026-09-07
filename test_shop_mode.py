@@ -106,7 +106,7 @@ class ShopModeAppTests(unittest.TestCase):
 
         text = _all_text(app)
         self.assertIn("ClickUp", text)
-        self.assertIn("Raul Bertoldini", text)
+        self.assertIn("© 2026 FAVI", text)
         self.assertTrue(_has_state_key(app, "clickup_draft_seed"))
         self.assertTrue(
             any(t.label == "Browse & filter panel" for t in app.toggle)
