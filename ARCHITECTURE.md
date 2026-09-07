@@ -169,6 +169,15 @@ reopen and make clearing a value back to empty impossible. Two consequences:
   (ClickUp, Browse toggle, personal footer, AWS wording) must not render, and
   the Checker's streaming path must honor the `feed_filter` caps in both modes.
 
+## Keeping the shop app awake
+
+Community Cloud parks an idle app and the next visitor gets Streamlit's generic
+"Zzzz" wake screen -- inside the onboarding iframe. `.github/workflows/keepalive.yml`
+opens the shop app in a headless browser every 5 hours (`.github/scripts/keepalive.py`),
+clicks the wake button if needed, and fails loudly if the app won't come up, so
+GitHub's failure e-mail doubles as an uptime check for outages the in-app Slack
+reporter cannot see. Trigger manually via Actions -> keep-alive -> Run workflow.
+
 ## Known follow-ups
 
 - **Validation re-parses on every full re-run** (e.g. editing the ClickUp draft or

@@ -1,0 +1,28 @@
+name: keep-alive
+
+# Community Cloud sleeps an idle app; a sleeping app shows a generic Streamlit
+# wake screen inside the onboarding iframe. Visit it like a viewer every few
+# hours (well under the idle threshold) and fail -- which emails the repo
+# owner -- if it cannot be brought up. Manual runs: Actions -> keep-alive -> Run.
+on:
+  schedule:
+    - cron: "23 */5 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install headless browser
+        run: |
+          pip install --quiet playwright
+          python -m playwright install --with-deps chromium
+      - name: Visit the shop app (wake it if asleep)
+        env:
+          APP_URL: https://favi-shops-feedchecker.streamlit.app/
+        run: python .github/scripts/keepalive.py
