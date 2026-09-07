@@ -72,6 +72,8 @@ inject_css()
 # the Checker leaks a temp file per check otherwise, and the shared TEMP_DIR
 # is the only disk this page writes to.
 fdl.cleanup_stale_temp_files()
+# Once per process: Slack 'started' ping (no-op without SLACK_WEBHOOK_URL).
+er.announce_boot(shop=app_mode.SHOP)
 # Page width is decided down with the layout, not here: side-by-side needs the
 # whole window, check-only reads better at the app's normal measure. A <style>
 # block styles the page wherever it lands, so it can wait for the toggle.

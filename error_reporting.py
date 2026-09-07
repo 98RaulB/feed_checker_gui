@@ -28,6 +28,34 @@ _TRACEBACK_TAIL = 1500
 
 _lock = threading.Lock()
 _last_sent: dict[tuple, float] = {}
+_boot_announced = False
+
+
+def announce_boot(*, shop: bool = False) -> bool:
+    """Once per process: post 'started - alerts armed'.
+
+    Proves the webhook + secret work every time the app (re)boots — no need to
+    induce a crash to test — and makes Community Cloud restarts/wake-ups
+    visible. Page scripts rerun on every interaction, so the guard is a
+    module-level flag, set BEFORE posting so a failed post never retries."""
+    global _boot_announced
+    with _lock:
+        if _boot_announced:
+            return False
+        _boot_announced = True
+    webhook = os.getenv(WEBHOOK_ENV, "").strip()
+    if not webhook:
+        return False
+    mode = "shop" if shop else "internal"
+    try:
+        response = requests.post(
+            webhook,
+            json={"text": f":white_check_mark: *Feed Checker ({mode})* started — error alerts armed."},
+            timeout=5,
+        )
+        return response.status_code < 300
+    except Exception:
+        return False
 
 
 def _should_send(key: tuple) -> bool:

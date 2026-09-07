@@ -52,6 +52,27 @@ class ErrorReportingTests(unittest.TestCase):
         self.assertIn("feed.xml", payload)
         self.assertIn("RuntimeError", payload)
 
+    def test_boot_announcement_fires_once_per_process(self):
+        er._boot_announced = False
+        env = {er.WEBHOOK_ENV: "https://hooks.slack.com/services/T/B/x"}
+        with (
+            mock.patch.dict("os.environ", env),
+            mock.patch.object(er.requests, "post", return_value=_Response()) as post,
+        ):
+            self.assertTrue(er.announce_boot(shop=True))
+            self.assertFalse(er.announce_boot(shop=True))
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("(shop)", post.call_args.kwargs["json"]["text"])
+        self.assertIn("started", post.call_args.kwargs["json"]["text"])
+
+    def test_boot_announcement_is_noop_without_webhook(self):
+        er._boot_announced = False
+        with mock.patch.object(er.requests, "post") as post:
+            import os
+            os.environ.pop(er.WEBHOOK_ENV, None)
+            self.assertFalse(er.announce_boot())
+        post.assert_not_called()
+
     def test_reporting_failure_never_raises(self):
         env = {er.WEBHOOK_ENV: "https://hooks.slack.com/services/T/B/x"}
         with (
