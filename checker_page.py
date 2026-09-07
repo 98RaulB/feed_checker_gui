@@ -73,7 +73,13 @@ inject_css()
 # is the only disk this page writes to.
 fdl.cleanup_stale_temp_files()
 # Once per process: Slack 'started' ping (no-op without SLACK_WEBHOOK_URL).
-er.announce_boot(shop=app_mode.SHOP)
+# Guarded: Streamlit Cloud can re-exec this page script while keeping an OLD
+# error_reporting module cached (partial reload after a git pull) — telemetry
+# must never be able to take the page down.
+try:
+    er.announce_boot(shop=app_mode.SHOP)
+except Exception:
+    pass
 # Page width is decided down with the layout, not here: side-by-side needs the
 # whole window, check-only reads better at the app's normal measure. A <style>
 # block styles the page wherever it lands, so it can wait for the toggle.
