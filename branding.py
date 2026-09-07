@@ -139,11 +139,16 @@ _CSS = f"""
     margin: 0 0 0.4rem 0;
   }}
   .favi-card-value {{
-    font-size: 1.875rem;
+    /* clamp: six cards share ~1000px inside the shop iframe. keep-all/normal:
+       wrap at spaces only, never mid-word ("Google Merchan|t"). */
+    font-size: clamp(1.25rem, 1.9vw, 1.875rem);
     font-weight: 600;
     color: var(--text-color, #1f2937);
     line-height: 1.1;
     margin: 0;
+    overflow-wrap: normal;
+    word-break: keep-all;
+    hyphens: none;
   }}
   .favi-card-delta {{
     font-size: 0.75rem;
