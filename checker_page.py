@@ -791,7 +791,7 @@ def process_item(elem, index: int, spec: str):
 
 # ---------- DOM path (Auto + small, non-gz, and only if NOT sample mode) ----------
 def run_dom_path() -> bool:
-    global xml_ok, spec_name, total_items, processed_items
+    global spec_name, total_items, processed_items
     try:
         with open_maybe_gzip(src_path) as fh:
             xml_bytes = fh.read()

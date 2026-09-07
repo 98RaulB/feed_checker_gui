@@ -26,7 +26,10 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install --requirement requirements.txt
+        run: pip install --requirement requirements.txt ruff
+
+      - name: Lint (ruff, correctness rules)
+        run: ruff check .
 
       - name: Run unit and Streamlit interaction tests
         env:

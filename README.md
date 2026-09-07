@@ -26,6 +26,7 @@ streamlit run feed_checker_gui.py   # internal app
 streamlit run shop_checker.py       # shop-facing app
 
 python -m unittest discover -v      # engine, SSRF, spec and Streamlit AppTest suites
+ruff check .                        # correctness lint (pyflakes rules), same gate as CI
 ```
 
 Python 3.12 is what CI runs. The `.devcontainer/` gives the same setup in
@@ -67,7 +68,7 @@ specific, and no secret is ever committed.
 
 | Workflow | Schedule | Purpose |
 |---|---|---|
-| `ci.yml` | push / PR | Full test suite on Python 3.12. |
+| `ci.yml` | push / PR | Correctness lint (`ruff`, pyflakes rules) and the full test suite on Python 3.12. |
 | `feed-quality-audit.yml` | nightly 04:47 UTC | Advisory audit of every live published feed; fails only on a *new* feed-level blocker. |
 | `keepalive.yml` | every 5 h | Visits the shop app in a headless browser so Community Cloud never shows partners its sleep screen; a failed run doubles as an uptime alert. |
 

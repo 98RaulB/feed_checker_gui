@@ -226,6 +226,25 @@ class ShopModeAppTests(unittest.TestCase):
         )
 
 
+    def test_streaming_parse_error_fails_the_xml_syntax_check(self):
+        # Regression: run_stream_path once assigned xml_ok as a LOCAL, so the
+        # summary's "XML syntax" row stayed green after a real parse error.
+        with open(self.path, "wb") as fh:
+            fh.write(FIXTURE[: len(FIXTURE) // 2])  # truncated = malformed XML
+        app = AppTest.from_file(str(ROOT / "shop_checker.py"))
+        app.session_state["loaded_feed"] = self._loaded_feed(
+            scope="Sample first N items"
+        )
+        app.run(timeout=20)
+        self.assertEqual(list(app.exception), [])
+        self.assertTrue(
+            any("XML syntax: ERROR" in str(e.value) for e in app.error),
+            [str(e.value) for e in app.error],
+        )
+        summary = " ".join(str(m.value) for m in app.markdown)
+        self.assertIn("❌ **XML syntax**", summary)
+
+
 class FeedDownloadUnitTests(unittest.TestCase):
     def test_persist_upload_rejects_oversized_files(self):
         upload = types.SimpleNamespace(getbuffer=lambda: memoryview(b"x" * 64))

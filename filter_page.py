@@ -15,7 +15,7 @@ import os
 
 import streamlit as st
 
-from branding import inject_css, page_header, render_metric_row
+from branding import inject_css, page_header
 import feed_filter as ff
 
 # Download/upload persistence, size+time caps, and the temp-file janitor live
