@@ -116,7 +116,17 @@ _CSS = f"""
   }}
 
   /* ── Metric cards ── backgrounds/text follow the active Streamlit theme. */
+  .favi-metric-row {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.75rem;
+    align-items: stretch;
+  }}
   .favi-card {{
+    /* inline-size containment lets the value/label scale with the CARD (cqw),
+       not the viewport — six cards in a 790px onboarding iframe are ~90px of
+       content each, where viewport units still overflow ("Merchan|t"). */
+    container-type: inline-size;
     background: var(--secondary-background-color, #fff);
     border: 1px solid color-mix(in srgb, var(--text-color, #1f2937) 12%, transparent);
     border-radius: 12px;
@@ -132,7 +142,7 @@ _CSS = f"""
   .favi-card-label {{
     /* Six cards inside a ~790px onboarding iframe: shrink a little and never
        break a word ("DUPLICAT|ES", "RECOMME|NDED") — wrap at spaces only. */
-    font-size: clamp(0.58rem, 0.9vw, 0.7rem);
+    font-size: clamp(0.55rem, 7cqw, 0.7rem);
     font-weight: 600;
     color: var(--text-color, #6b7280);
     opacity: 0.6;
@@ -146,7 +156,7 @@ _CSS = f"""
   .favi-card-value {{
     /* clamp: six cards share ~1000px inside the shop iframe. keep-all/normal:
        wrap at spaces only, never mid-word ("Google Merchan|t"). */
-    font-size: clamp(1.25rem, 1.9vw, 1.875rem);
+    font-size: clamp(0.9rem, 19cqw, 1.875rem);
     font-weight: 600;
     color: var(--text-color, #1f2937);
     line-height: 1.1;
@@ -154,6 +164,9 @@ _CSS = f"""
     overflow-wrap: normal;
     word-break: keep-all;
     hyphens: none;
+  }}
+  @container (max-width: 150px) {{
+    .favi-card {{ padding: 0.75rem 0.7rem; }}
   }}
   .favi-card-delta {{
     font-size: 0.75rem;
@@ -289,14 +302,18 @@ def metric_card(label: str, value: Any, *, delta: str | None = None,
 
 
 def render_metric_row(items: list[tuple]) -> None:
-    """Render a row of metric cards. Each item is (label, value, tone[, delta])."""
-    cols = st.columns(len(items))
-    for col, item in zip(cols, items):
+    """Render a row of metric cards. Each item is (label, value, tone[, delta]).
+
+    One responsive CSS grid rather than st.columns: six fixed columns inside a
+    ~790px onboarding iframe leave ~65px per card and nothing fits; the grid
+    wraps (4+2, then 3+3, then stacked) so cards never drop below ~150px."""
+    cards = []
+    for item in items:
         label, value, tone, *rest = item
         delta = rest[0] if rest else None
-        with col:
-            st.markdown(metric_card(label, value, tone=tone, delta=delta),
-                        unsafe_allow_html=True)
+        cards.append(metric_card(label, value, tone=tone, delta=delta))
+    st.markdown(f'<div class="favi-metric-row">{"".join(cards)}</div>',
+                unsafe_allow_html=True)
 
 
 # ── Status pills ─────────────────────────────────────────────────────────────
