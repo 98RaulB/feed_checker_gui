@@ -130,13 +130,18 @@ _CSS = f"""
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
   }}
   .favi-card-label {{
-    font-size: 0.7rem;
+    /* Six cards inside a ~790px onboarding iframe: shrink a little and never
+       break a word ("DUPLICAT|ES", "RECOMME|NDED") — wrap at spaces only. */
+    font-size: clamp(0.58rem, 0.9vw, 0.7rem);
     font-weight: 600;
     color: var(--text-color, #6b7280);
     opacity: 0.6;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.05em;
     margin: 0 0 0.4rem 0;
+    overflow-wrap: normal;
+    word-break: keep-all;
+    hyphens: none;
   }}
   .favi-card-value {{
     /* clamp: six cards share ~1000px inside the shop iframe. keep-all/normal:
