@@ -448,17 +448,23 @@ SPEC: Dict[str, Dict[str, Any]] = {
     "Compari / Árukereső / Pazaruvaj (case-insensitive)": {
         "item_paths": [".//product"],
         "id_paths": ["./Identifier", "./identifier", "./ProductId", "./productid", "./id"],
-        "link_paths": ["./Product_url", "./product_url", "./ProductUrl", "./producturl"],
+        # The Pazaruvaj shop plugin emits <url> rather than <product_url>; kept
+        # last so a feed carrying both still resolves product_url first.
+        "link_paths": ["./Product_url", "./product_url", "./ProductUrl", "./producturl", "./url"],
         "image_primary_paths": ["./Image_url", "./image_url", "./ImageUrl", "./imageurl"],
         "price_paths": ["./Price", "./price"],
-        "required_fields": ["identifier|productid", "name", "product_url", "price", "image_url", "category", "description"],
+        "required_fields": ["identifier|productid", "name", "product_url|url", "price", "image_url", "category", "description"],
         "availability_paths": ["./availability", "./in_stock", "./stock", "./availability_status", "./Delivery_time", "./DeliveryTime", "./deliverytime"],
         "availability_aliases": ["availability", "in_stock", "stock", "availability_status", "Delivery_time", "DeliveryTime", "deliverytime"],
         "signature_tags": [
-            "identifier","productid","name","product_url","producturl","image_url","imageurl","category",
+            "identifier","productid","name","product_url","producturl","url","image_url","imageurl","category",
             "category_full","manufacturer","description","delivery_time","deliverytime","stock","in_stock"
         ],
-        "expected_root_locals": ["products"],
+        # The Pazaruvaj shop plugin nests <products> inside a <shop> root, the
+        # same wrapper accommodation Skroutz needs for <mywebstore>. Heureka and
+        # Jeftinije also use a <shop> root but are matched (and returned) earlier
+        # on .//SHOPITEM and .//Item, so they cannot fall through to here.
+        "expected_root_locals": ["products", "shop"],
     },
 
     "Skroutz strict": {

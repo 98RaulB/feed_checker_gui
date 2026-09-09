@@ -211,6 +211,54 @@ class DetectionRegressionTest(unittest.TestCase):
                "</product></products>")
         self.assertEqual(fs.detect_spec(ET.fromstring(xml)), "UNKNOWN")
 
+    def test_pazaruvaj_plugin_shop_root(self):
+        # The Pazaruvaj shop plugin nests <products> inside a <shop> root and
+        # names the link field <url>, not <product_url>. Before the root was
+        # allowed this returned UNKNOWN ("Unknown feed specification") for an
+        # otherwise healthy feed.
+        xml = ("<shop><products><product>"
+               "<id>32</id><url>https://x.bg/p.html</url><price>33.95</price>"
+               "<category>Cat &gt; Sub</category>"
+               "<image_url>https://x.bg/i.png</image_url>"
+               "<name>N</name><manufacturer>M</manufacturer>"
+               "<description>d</description>"
+               "</product></products></shop>")
+        root = ET.fromstring(xml)
+        spec = fs.detect_spec(root)
+        self.assertEqual(spec, COMPARI)
+        # Detection alone is not enough: <url> must resolve through link_paths,
+        # or every item mass-flags as missing a URL.
+        elem = root.find(".//product")
+        self.assertEqual(fs.read_link(elem, spec), "https://x.bg/p.html")
+        self.assertEqual(
+            fs.gather_primary_image(elem, spec, do_percent_encode=False),
+            "https://x.bg/i.png",
+        )
+
+    def test_compari_product_url_still_wins_over_url(self):
+        # <url> is appended last in link_paths on purpose: a feed carrying both
+        # must still resolve the canonical product_url.
+        xml = ("<products><product><Identifier>1</Identifier><Name>N</Name>"
+               "<Product_url>https://x/canonical</Product_url>"
+               "<url>https://x/other</url>"
+               "<Image_url>https://x/i.jpg</Image_url><Price>10.00</Price>"
+               "<Category>C</Category><Description>d</Description>"
+               "</product></products>")
+        root = ET.fromstring(xml)
+        spec = fs.detect_spec(root)
+        self.assertEqual(spec, COMPARI)
+        self.assertEqual(
+            fs.read_link(root.find(".//product"), spec), "https://x/canonical"
+        )
+
+    def test_heureka_shop_root_not_stolen_by_compari(self):
+        # Heureka also uses a <shop> root. It is matched on .//SHOPITEM and
+        # returns earlier, so allowing "shop" for Compari must not steal it.
+        xml = ("<shop><SHOPITEM><ITEM_ID>1</ITEM_ID><PRODUCTNAME>N</PRODUCTNAME>"
+               "<URL>https://x.cz/p</URL><IMGURL>https://x.cz/i.jpg</IMGURL>"
+               "<PRICE_VAT>10</PRICE_VAT></SHOPITEM></shop>")
+        self.assertEqual(fs.detect_spec(ET.fromstring(xml)), "Heureka strict")
+
     def test_heureka_itemgroup_is_not_an_id(self):
         xml = ("<SHOP><SHOPITEM><ITEMGROUP_ID>G1</ITEMGROUP_ID>"
                "<PRODUCTNAME>A</PRODUCTNAME><URL>https://x/a</URL>"
